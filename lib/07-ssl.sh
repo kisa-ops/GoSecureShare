@@ -52,7 +52,7 @@ _prompt_cert_file() {
     echo ""
     echo -e "  ${BOLD}${label}${RESET}"
     echo -e "  ${CYAN}  1) Provide a file path${RESET}   ${DIM}(file must exist on this server)${RESET}"
-    echo -e "  ${CYAN}  2) Paste content${RESET}         ${DIM}(paste PEM block, then type EOF on its own line to finish)${RESET}"
+    echo -e "  ${CYAN}  2) Paste content${RESET}         ${DIM}(paste PEM block, press Enter, type EOF, press Enter)${RESET}"
     read -rp "$(echo -e "  ${BOLD}  Choose 1 or 2 [1]: ${RESET}")" _mode
     _mode=${_mode:-1}
 
@@ -65,7 +65,7 @@ _prompt_cert_file() {
         local _path
         while true; do
           read -rp "$(echo -e "    ${CYAN}Path to ${label}: ${RESET}")" _path
-          _path=$(echo "${_path}" | xargs)   # trim surrounding whitespace
+          _path=$(echo "${_path}" | xargs)
           if [[ -z "${_path}" ]]; then
             warn "    Path cannot be empty."
           elif [[ ! -f "${_path}" ]]; then
@@ -88,9 +88,9 @@ _prompt_cert_file() {
       2)
         echo ""
         echo -e "  ${YELLOW}Paste the ${label} PEM content below.${RESET}"
-        echo -e "  ${YELLOW}When done, type ${BOLD}EOF${RESET}${YELLOW} on its own line and press Enter.${RESET}"
+        echo -e "  ${YELLOW}When finished: press ${BOLD}Enter${RESET}${YELLOW}, type ${BOLD}EOF${RESET}${YELLOW}, then press ${BOLD}Enter${RESET}${YELLOW} again.${RESET}"
         echo ""
-        : > "${dest}"   # truncate/create destination file
+        : > "${dest}"
         local _line _got_content=false
         while IFS= read -r _line; do
           [[ "${_line}" == "EOF" ]] && break
@@ -100,7 +100,7 @@ _prompt_cert_file() {
         if [[ "${_got_content}" == "false" ]] || [[ ! -s "${dest}" ]]; then
           warn "    No content received — please try again."
           rm -f "${dest}"
-          continue   # re-show the mode prompt
+          continue
         fi
         if ! grep -q 'BEGIN' "${dest}" 2>/dev/null; then
           warn "    Pasted content does not look like a PEM file (no -----BEGIN line found)."
@@ -143,7 +143,6 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
   [[ -z "${RECIPIENT_DOMAIN}" ]] && error "Recipient domain cannot be empty."
   [[ "${PLATFORM_DOMAIN}" == "${RECIPIENT_DOMAIN}" ]] && error "Platform and Recipient domains must be different."
 
-  # Always bind Docker containers to localhost when SSL is enabled
   PLATFORM_BIND="127.0.0.1:${PLATFORM_HTTP_PORT}"
   RECIPIENT_BIND="127.0.0.1:${RECIPIENT_HTTP_PORT}"
 
@@ -181,7 +180,6 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     _prompt_cert_file "Platform certificate (.crt / .pem)"      "${SSL_CERT_DIR}/platform/cert.pem"
     _prompt_cert_file "Platform private key (.key / .pem)"      "${SSL_CERT_DIR}/platform/key.pem"
     _prompt_cert_file "Platform root / CA bundle (.crt / .pem)" "${SSL_CERT_DIR}/platform/ca-bundle.pem"
-    # Build fullchain: leaf cert + CA bundle (required by Nginx ssl_certificate)
     cat "${SSL_CERT_DIR}/platform/cert.pem" \
         "${SSL_CERT_DIR}/platform/ca-bundle.pem" \
         > "${SSL_CERT_DIR}/platform/fullchain.pem"
@@ -222,7 +220,7 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     info "Installing host Nginx..."
     if command -v apt-get &>/dev/null; then
       apt-get update -qq
-      apt-get install -y -qq nginx
+      DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx
     elif command -v dnf &>/dev/null; then
       dnf install -y nginx
     elif command -v yum &>/dev/null; then
@@ -235,7 +233,9 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
     rm -f /etc/nginx/sites-enabled/default
 
-    # Write host Nginx TLS virtual hosts
+    # NOTE: 'listen 443 ssl http2' is used instead of standalone 'http2 on;'
+    # for compatibility with nginx 1.24 shipped in Ubuntu LTS.
+    # nginx 1.25.1+ accepts both forms; 'http2 on;' fails on 1.24.
     info "Writing host Nginx TLS configs..."
     cat > /etc/nginx/sites-available/gss-platform <<NGINXEOF
 server {
@@ -244,8 +244,7 @@ server {
     return 301 https://\$host\$request_uri;
 }
 server {
-    listen 443 ssl;
-    http2 on;
+    listen 443 ssl http2;
     server_name ${PLATFORM_DOMAIN};
 
     ssl_certificate         ${PLATFORM_CERT_DIR}/fullchain.pem;
@@ -280,8 +279,7 @@ server {
     return 301 https://\$host\$request_uri;
 }
 server {
-    listen 443 ssl;
-    http2 on;
+    listen 443 ssl http2;
     server_name ${RECIPIENT_DOMAIN};
 
     ssl_certificate         ${RECIPIENT_CERT_DIR}/fullchain.pem;

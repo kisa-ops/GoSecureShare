@@ -25,11 +25,8 @@
 #   Override path: GSS_DB_DIR=/path/to/db sudo ./install.sh
 #
 # AUTHENTICATION
-#   Prompted interactively during install (GHCR_USERNAME + GHCR_TOKEN).
-#   To skip prompts (e.g. CI), pre-export before running:
-#     export GHCR_USERNAME=your-github-username
-#     export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-#     sudo -E ./install.sh          # -E passes env vars through sudo
+#   Always prompted interactively (GHCR_USERNAME + GHCR_TOKEN).
+#   Cannot be skipped via environment variables.
 #
 # SSL OPTIONS (prompted during install):
 #   1) Own reverse proxy (Cloudflare, Nginx, HAProxy, F5, etc.)
@@ -65,9 +62,9 @@ echo ""
 
 # =============================================================================
 # GHCR CREDENTIALS
-# Prompted here — before lib bootstrap — so the token is available for
+# Always prompted — no environment variable shortcut.
+# Collected before lib bootstrap so the token is available for
 # private-repo lib fetching AND for docker pull in 04-auth-pull.sh.
-# Skipped if already exported in the environment (sudo -E ./install.sh).
 # =============================================================================
 echo -e "${BOLD}── GHCR Credentials ────────────────────────────────────────────${RESET}"
 echo -e "  ${CYAN}GoSecureShare images are hosted on GitHub Container Registry (GHCR).${RESET}"
@@ -75,36 +72,28 @@ echo -e "  ${CYAN}A GitHub username and a Personal Access Token (PAT) with at le
 echo -e "  ${CYAN}'read:packages' scope are required to pull the images.${RESET}"
 echo ""
 
-if [[ -z "${GHCR_USERNAME:-}" ]]; then
-  while true; do
-    read -rp "$(echo -e "  ${BOLD}GitHub username (GHCR_USERNAME): ${RESET}")" GHCR_USERNAME
-    GHCR_USERNAME=$(echo "${GHCR_USERNAME}" | xargs)
-    [[ -n "${GHCR_USERNAME}" ]] && break
-    echo -e "  ${YELLOW}[WARN]${RESET}  Username cannot be empty."
-  done
-else
-  echo -e "  ${GREEN}[OK]${RESET}    GHCR_USERNAME already set: ${GHCR_USERNAME}"
-fi
+while true; do
+  read -rp "$(echo -e "  ${BOLD}GitHub username (GHCR_USERNAME): ${RESET}")" GHCR_USERNAME
+  GHCR_USERNAME=$(echo "${GHCR_USERNAME}" | xargs)
+  [[ -n "${GHCR_USERNAME}" ]] && break
+  echo -e "  ${YELLOW}[WARN]${RESET}  Username cannot be empty."
+done
 
-if [[ -z "${GHCR_TOKEN:-}" ]]; then
-  while true; do
-    read -rsp "$(echo -e "  ${BOLD}GitHub PAT    (GHCR_TOKEN):    ${RESET}")" GHCR_TOKEN
-    echo ""   # newline after silent input
-    GHCR_TOKEN=$(echo "${GHCR_TOKEN}" | xargs)
-    [[ -n "${GHCR_TOKEN}" ]] && break
-    echo -e "  ${YELLOW}[WARN]${RESET}  Token cannot be empty."
-  done
-else
-  echo -e "  ${GREEN}[OK]${RESET}    GHCR_TOKEN already set (length: ${#GHCR_TOKEN})."
-fi
+while true; do
+  read -rsp "$(echo -e "  ${BOLD}GitHub PAT    (GHCR_TOKEN):    ${RESET}")" GHCR_TOKEN
+  echo ""   # newline after silent input
+  GHCR_TOKEN=$(echo "${GHCR_TOKEN}" | xargs)
+  [[ -n "${GHCR_TOKEN}" ]] && break
+  echo -e "  ${YELLOW}[WARN]${RESET}  Token cannot be empty."
+done
 
 export GHCR_USERNAME
 export GHCR_TOKEN
 export GHCR_IMAGES_PRIVATE=true
 
 echo ""
-success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
-success "GHCR credentials captured. GHCR_IMAGES_PRIVATE=true."
+_ok() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+_ok "GHCR credentials captured. GHCR_IMAGES_PRIVATE=true."
 echo ""
 
 # =============================================================================
