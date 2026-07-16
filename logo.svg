@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="200" height="200" viewBox="0 0 200 200" fill="none" xmlns="http://www.w3.org/2000/svg"
+     aria-label="GoSecureShare">
+  <defs>
+    <filter id="lgGlow" x="-40%" y="-40%" width="180%" height="180%">
+      <feGaussianBlur stdDeviation="3" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <!-- Shield outline -->
+  <path d="M100 20 L168 48 L168 108 C168 152 136 174 100 186 C64 174 32 152 32 108 L32 48 Z"
+        stroke="#22c55e" stroke-width="4" stroke-linejoin="round" fill="none" opacity="0.4"/>
+
+  <!-- Network lines -->
+  <line x1="100" y1="48"  x2="100" y2="76"  stroke="#22c55e" stroke-width="2" opacity="0.5"/>
+  <line x1="100" y1="104" x2="100" y2="132" stroke="#22c55e" stroke-width="2" opacity="0.5"/>
+  <line x1="68"  y1="64"  x2="84"  y2="84"  stroke="#22c55e" stroke-width="2" opacity="0.5"/>
+  <line x1="132" y1="64"  x2="116" y2="84"  stroke="#22c55e" stroke-width="2" opacity="0.5"/>
+  <line x1="46"  y1="104" x2="72"  y2="106" stroke="#22c55e" stroke-width="2" opacity="0.5"/>
+  <line x1="154" y1="104" x2="128" y2="106" stroke="#22c55e" stroke-width="2" opacity="0.5"/>
+  <line x1="84"  y1="116" x2="74"  y2="138" stroke="#22c55e" stroke-width="2" opacity="0.5"/>
+  <line x1="116" y1="116" x2="126" y2="138" stroke="#22c55e" stroke-width="2" opacity="0.5"/>
+
+  <!-- Top node -->
+  <polygon points="100,22  108,27  108,38  100,43  92,38  92,27"
+           fill="#22c55e" opacity="0.9" filter="url(#lgGlow)"/>
+  <!-- Left node -->
+  <polygon points="66,62   74,67   74,78   66,83   58,78   58,67"
+           fill="#22c55e" opacity="0.75"/>
+  <!-- Right node -->
+  <polygon points="134,62  142,67  142,78  134,83  126,78  126,67"
+           fill="#22c55e" opacity="0.75"/>
+  <!-- Centre node (brightest) -->
+  <polygon points="100,80  111,86  111,100 100,106 89,100  89,86"
+           fill="#22c55e" opacity="1" filter="url(#lgGlow)"/>
+  <!-- Left outer node -->
+  <polygon points="46,100  56,106  56,117  46,122  36,117  36,106"
+           fill="#22c55e" opacity="0.65"/>
+  <!-- Right outer node -->
+  <polygon points="154,100 164,106 164,117 154,122 144,117 144,106"
+           fill="#22c55e" opacity="0.65"/>
+  <!-- Bottom node -->
+  <polygon points="100,130 108,135 108,146 100,151 92,146  92,135"
+           fill="#22c55e" opacity="0.8"/>
+
+  <!-- Centre glow dot -->
+  <circle cx="100" cy="93" r="8" fill="#22c55e" opacity="0.3"/>
+</svg>
