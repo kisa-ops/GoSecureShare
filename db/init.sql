@@ -1,0 +1,10 @@
+-- GoSecureShare Production DB bootstrap
+-- This file is intentionally a no-op.
+--
+-- ALL schema/role/table creation is handled by docker-migrate.sh
+-- (the db-migrate init container), which runs on every `docker compose up`
+-- and is fully idempotent.
+--
+-- Postgres only executes files in /docker-entrypoint-initdb.d on an EMPTY
+-- volume, making it unreliable for reinstalls and upgrades.
+-- docker-migrate.sh runs unconditionally and is the single source of truth.
