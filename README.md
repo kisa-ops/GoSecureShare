@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://gosecureshare.com">
-    <img src="../logo.svg" alt="GoSecureShare" width="200" />
+    <img src="logo.svg" alt="GoSecureShare" width="200" />
   </a>
 </p>
 

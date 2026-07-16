@@ -35,7 +35,9 @@ fi
 # files are always pulled from the same ref. Override with GSS_DB_REF.
 DB_REF="${GSS_DB_REF:-${GSS_LIB_REF:-main}}"
 DB_RAW_BASE="https://raw.githubusercontent.com/kisa-ops/GoSecureShare/${DB_REF}/db"
-DB_API_BASE="https://api.github.com/repos/kisa-ops/GoSecureShare/contents/db?ref=${DB_REF}"
+# NOTE: DB_API_BASE must NOT include ?ref= here — the ref is appended per-file
+#       in _fetch_db_api as: contents/db/<file>?ref=<ref>
+DB_API_CONTENTS_BASE="https://api.github.com/repos/kisa-ops/GoSecureShare/contents/db"
 
 # ---------------------------------------------------------------------------
 # _fetch_db_api  —  GitHub Contents API fallback (private repos)
@@ -44,10 +46,11 @@ DB_API_BASE="https://api.github.com/repos/kisa-ops/GoSecureShare/contents/db?ref
 # ---------------------------------------------------------------------------
 _fetch_db_api() {
   local file="$1" dest="$2"
-  local url="${DB_API_BASE}/${file}"
+  # Correct URL: /contents/db/<file>?ref=<ref>
+  local url="${DB_API_CONTENTS_BASE}/${file}?ref=${DB_REF}"
   local token_header=(-H "Authorization: Bearer ${GHCR_TOKEN}")
 
-  # Attempt 1: raw media type (no base64 involved)
+  # Attempt 1: raw media type (direct content, no base64)
   if curl -fsSL --connect-timeout 10 \
       "${token_header[@]}" \
       -H "Accept: application/vnd.github.v3.raw" \
@@ -119,7 +122,7 @@ _resolve_db_file() {
 }
 
 # ---------------------------------------------------------------------------
-# Fetch both DB files; collect failures and abort if any
+# Fetch both DB files; collect failures and abort hard if any
 # ---------------------------------------------------------------------------
 if [[ -z "${LOCAL_DB_DIR}" ]]; then
   info "No local db/ folder found — fetching from GitHub (ref: ${DB_REF})..."
@@ -132,30 +135,27 @@ done
 
 if [[ ${#DB_FAILED[@]} -gt 0 ]]; then
   echo ""
-  error_body() {
-    echo -e "${RED}[ERROR]${RESET} Failed to fetch DB file(s): ${DB_FAILED[*]}" >&2
-    echo "" >&2
-    if [[ -z "${GHCR_TOKEN:-}" ]]; then
-      echo -e "  ${YELLOW}The repo may be private. Options:${RESET}" >&2
-      echo -e "  A) Place db/ folder next to install.sh (no token needed):" >&2
-      echo -e "       ${SCRIPT_DIR}/db/init.sql" >&2
-      echo -e "       ${SCRIPT_DIR}/db/docker-migrate.sh" >&2
-      echo -e "  B) Supply a token with 'repo' scope:" >&2
-      echo -e "       export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx" >&2
-      echo -e "       sudo -E ./install.sh" >&2
-      echo -e "  C) Explicit path override: GSS_DB_DIR=/your/path sudo ./install.sh" >&2
-    else
-      echo -e "  ${YELLOW}Token was supplied but all fetch paths failed. Check:${RESET}" >&2
-      echo -e "    • Token has 'repo' scope (not just 'read:packages')" >&2
-      echo -e "    • DNS: nslookup raw.githubusercontent.com && nslookup api.github.com" >&2
-      echo -e "    • Proxy: export https_proxy=http://<proxy>:<port>" >&2
-      echo -e "    • Verify python3 is available (used for API decode fallback)" >&2
-      echo -e "  Or place db/ locally: ${SCRIPT_DIR}/db/ and re-run." >&2
-    fi
-    echo "" >&2
-  }
-  error_body
-  # Clean up any partially downloaded files to avoid half-state
+  echo -e "${RED}[ERROR]${RESET} Failed to fetch DB file(s): ${DB_FAILED[*]}" >&2
+  echo "" >&2
+  if [[ -z "${GHCR_TOKEN:-}" ]]; then
+    echo -e "  ${YELLOW}The repo may be private. Options:${RESET}" >&2
+    echo -e "  A) Place db/ folder next to install.sh (no token needed):" >&2
+    echo -e "       ${SCRIPT_DIR}/db/init.sql" >&2
+    echo -e "       ${SCRIPT_DIR}/db/docker-migrate.sh" >&2
+    echo -e "  B) Supply a token with 'repo' scope:" >&2
+    echo -e "       export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx" >&2
+    echo -e "       sudo -E ./install.sh" >&2
+    echo -e "  C) Explicit path override: GSS_DB_DIR=/your/path sudo ./install.sh" >&2
+  else
+    echo -e "  ${YELLOW}Token was supplied but all fetch paths failed. Check:${RESET}" >&2
+    echo -e "    • Token has 'repo' scope (not just 'read:packages')" >&2
+    echo -e "    • DNS: nslookup raw.githubusercontent.com && nslookup api.github.com" >&2
+    echo -e "    • Proxy: export https_proxy=http://<proxy>:<port>" >&2
+    echo -e "    • python3 available (needed for API decode fallback)" >&2
+    echo -e "  Or place db/ locally: ${SCRIPT_DIR}/db/ and re-run." >&2
+  fi
+  echo "" >&2
+  # Clean up partial downloads to avoid half-state on next run
   rm -f "${INSTALL_DIR}/db/init.sql" "${INSTALL_DIR}/db/docker-migrate.sh"
   exit 1
 fi
