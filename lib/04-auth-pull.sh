@@ -2,6 +2,9 @@
 # =============================================================================
 # 04-auth-pull.sh — GHCR login and image pulling
 # Sourced by install.sh — do not execute directly.
+#
+# GHCR_USERNAME, GHCR_TOKEN, and GHCR_IMAGES_PRIVATE=true are always set
+# by install.sh before this module is sourced.
 # =============================================================================
 
 echo ""
@@ -12,36 +15,18 @@ success "Server IP detected: ${SERVER_IP}"
 echo ""
 info "── GHCR Authentication ──────────────────────────────────────"
 
-if [[ "${GHCR_IMAGES_PRIVATE:-false}" == "true" ]]; then
-  if [[ -z "${GHCR_USERNAME:-}" || -z "${GHCR_TOKEN:-}" ]]; then
-    echo ""
-    echo -e "${RED}[ERROR]${RESET} GHCR_IMAGES_PRIVATE=true but credentials are missing." >&2
-    echo -e "        Re-run with your GitHub PAT (scope: read:packages):" >&2
-    echo "" >&2
-    echo -e "  ${CYAN}export GHCR_USERNAME=your-github-username${RESET}" >&2
-    echo -e "  ${CYAN}export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx${RESET}" >&2
-    echo -e "  ${CYAN}sudo -E ./install.sh${RESET}   # -E passes env vars through sudo" >&2
-    echo "" >&2
-    exit 1
-  fi
+# Credentials are always collected at startup; this is a safety guard only.
+if [[ -z "${GHCR_USERNAME:-}" || -z "${GHCR_TOKEN:-}" ]]; then
+  error "GHCR credentials are missing. This should not happen — please re-run install.sh from the beginning."
 fi
 
-if [[ -n "${GHCR_USERNAME:-}" && -n "${GHCR_TOKEN:-}" ]]; then
-  info "Logging in to GHCR as ${GHCR_USERNAME}..."
-  echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin \
-    && success "GHCR login successful." \
-    || error "GHCR login failed. Check GHCR_USERNAME and GHCR_TOKEN."
-else
-  info "No GHCR credentials supplied — attempting public pull."
-  warn "If images are private, abort now (Ctrl+C) and re-run with:"
-  echo -e "  ${CYAN}export GHCR_USERNAME=<github-user>${RESET}"
-  echo -e "  ${CYAN}export GHCR_TOKEN=<ghcr-pat>${RESET}"
-  echo -e "  ${CYAN}export GHCR_IMAGES_PRIVATE=true${RESET}   # causes early abort if creds missing"
-  echo -e "  ${CYAN}sudo -E ./install.sh${RESET}"
-fi
+info "Logging in to GHCR as ${GHCR_USERNAME}..."
+echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin \
+  && success "GHCR login successful." \
+  || error "GHCR login failed. Check that your token has 'read:packages' scope."
 
 echo ""
-info "Pulling GoSecureShare images (namespace: ghcr.io/${NAMESPACE})..."
+info "── Pulling GoSecureShare images (ghcr.io/${NAMESPACE}) ──────"
 echo ""
 PULL_FAILED=()
 for IMAGE in "${ALL_IMAGES[@]}"; do
@@ -59,12 +44,11 @@ if [[ ${#PULL_FAILED[@]} -gt 0 ]]; then
   printf '         - %s\n' "${PULL_FAILED[@]}"
   echo ""
   echo -e "  ${YELLOW}Possible causes:${RESET}"
-  echo -e "  1. Images are private — re-run with GHCR_USERNAME and GHCR_TOKEN set."
-  echo -e "     Set GHCR_IMAGES_PRIVATE=true to catch this before pulling next time."
+  echo -e "  1. Token lacks 'read:packages' scope — generate a new PAT and re-run."
   echo -e "  2. Wrong image name — verify at: https://github.com/orgs/kisa-ops/packages"
   echo -e "  3. No internet access to ghcr.io on this host."
   exit 1
 fi
-success "All 6 images pulled (tag: ${VERSION})."
+success "All images pulled successfully (tag: ${VERSION})."
 echo ""
 docker images --format "table {{.Repository}}\t{{.Tag}}\t{{.Size}}" | grep -E "(gosecureshare|postgres|nginx)" || true

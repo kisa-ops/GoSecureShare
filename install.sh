@@ -8,11 +8,6 @@
 #   This script only needs itself to start. If the lib/ directory is not
 #   present alongside install.sh, all required lib files are automatically
 #   fetched from GitHub before installation proceeds.
-#   If the repo is private, supply a token with 'repo' scope:
-#     export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-#     sudo -E ./install.sh
-#   To pin to a specific ref for lib fetching (default: main):
-#     GSS_LIB_REF=v2.3.1 sudo -E ./install.sh
 #
 # PORT DEFAULTS
 #   Platform  (internal admin UI):  HTTP 8181  →  HTTPS 443 (behind host Nginx)
@@ -26,13 +21,15 @@
 # DB FILES (init.sql + docker-migrate.sh)
 #   Resolution order (first match wins):
 #     1. Local  — db/ folder next to install.sh
-#     2. Remote — fetched from raw.githubusercontent.com via GHCR_TOKEN (if set)
+#     2. Remote — fetched from raw.githubusercontent.com / GitHub API
 #   Override path: GSS_DB_DIR=/path/to/db sudo ./install.sh
 #
-# AUTHENTICATION (required when images or repo are private):
-#   export GHCR_USERNAME=your-github-username
-#   export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-#   sudo -E ./install.sh          # -E passes env vars through sudo
+# AUTHENTICATION
+#   Prompted interactively during install (GHCR_USERNAME + GHCR_TOKEN).
+#   To skip prompts (e.g. CI), pre-export before running:
+#     export GHCR_USERNAME=your-github-username
+#     export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+#     sudo -E ./install.sh          # -E passes env vars through sudo
 #
 # SSL OPTIONS (prompted during install):
 #   1) Own reverse proxy (Cloudflare, Nginx, HAProxy, F5, etc.)
@@ -40,9 +37,10 @@
 #   2) Provide certificate files
 #      → Host Nginx installed as TLS terminator.
 #      → Cert, key, CA bundle asked separately for Platform then Recipient.
+#      → Each file can be provided as a path or by pasting the PEM content.
 #
 # REINSTALL / CI FLAGS
-#   GSS_FORCE_REINSTALL=true   Skip reinstall confirmation (useful for CI).
+#   GSS_FORCE_REINSTALL=true   Skip reinstall confirmation.
 # =============================================================================
 set -euo pipefail
 
@@ -63,6 +61,50 @@ echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..60})╗${RESET}"
 echo -e "${BOLD}${GREEN}║      GoSecureShare — Automated Installer                   ║${RESET}"
 echo -e "${BOLD}${GREEN}║      Self-Hosted Zero-Knowledge Secret Sharing             ║${RESET}"
 echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..60})╝${RESET}"
+echo ""
+
+# =============================================================================
+# GHCR CREDENTIALS
+# Prompted here — before lib bootstrap — so the token is available for
+# private-repo lib fetching AND for docker pull in 04-auth-pull.sh.
+# Skipped if already exported in the environment (sudo -E ./install.sh).
+# =============================================================================
+echo -e "${BOLD}── GHCR Credentials ────────────────────────────────────────────${RESET}"
+echo -e "  ${CYAN}GoSecureShare images are hosted on GitHub Container Registry (GHCR).${RESET}"
+echo -e "  ${CYAN}A GitHub username and a Personal Access Token (PAT) with at least${RESET}"
+echo -e "  ${CYAN}'read:packages' scope are required to pull the images.${RESET}"
+echo ""
+
+if [[ -z "${GHCR_USERNAME:-}" ]]; then
+  while true; do
+    read -rp "$(echo -e "  ${BOLD}GitHub username (GHCR_USERNAME): ${RESET}")" GHCR_USERNAME
+    GHCR_USERNAME=$(echo "${GHCR_USERNAME}" | xargs)
+    [[ -n "${GHCR_USERNAME}" ]] && break
+    echo -e "  ${YELLOW}[WARN]${RESET}  Username cannot be empty."
+  done
+else
+  echo -e "  ${GREEN}[OK]${RESET}    GHCR_USERNAME already set: ${GHCR_USERNAME}"
+fi
+
+if [[ -z "${GHCR_TOKEN:-}" ]]; then
+  while true; do
+    read -rsp "$(echo -e "  ${BOLD}GitHub PAT    (GHCR_TOKEN):    ${RESET}")" GHCR_TOKEN
+    echo ""   # newline after silent input
+    GHCR_TOKEN=$(echo "${GHCR_TOKEN}" | xargs)
+    [[ -n "${GHCR_TOKEN}" ]] && break
+    echo -e "  ${YELLOW}[WARN]${RESET}  Token cannot be empty."
+  done
+else
+  echo -e "  ${GREEN}[OK]${RESET}    GHCR_TOKEN already set (length: ${#GHCR_TOKEN})."
+fi
+
+export GHCR_USERNAME
+export GHCR_TOKEN
+export GHCR_IMAGES_PRIVATE=true
+
+echo ""
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+success "GHCR credentials captured. GHCR_IMAGES_PRIVATE=true."
 echo ""
 
 # =============================================================================
@@ -96,8 +138,7 @@ if [[ "${_needs_bootstrap}" == "true" ]]; then
   echo -e "${CYAN}[INFO]${RESET}  lib/ not found — fetching from GitHub (ref: ${LIB_REF})..."
   echo ""
   mkdir -p "${LIB_DIR}"
-  _curl_auth=()
-  [[ -n "${GHCR_TOKEN:-}" ]] && _curl_auth=(-H "Authorization: Bearer ${GHCR_TOKEN}")
+  _curl_auth=(-H "Authorization: Bearer ${GHCR_TOKEN}")
   _bootstrap_failed=false
   for _f in "${LIB_FILES[@]}"; do
     if curl -fsSL --connect-timeout 10 \
@@ -115,9 +156,7 @@ if [[ "${_needs_bootstrap}" == "true" ]]; then
     echo -e "${RED}[ERROR]${RESET} One or more lib files could not be fetched." >&2
     echo -e "        Possible causes:" >&2
     echo -e "          1. No internet access to raw.githubusercontent.com" >&2
-    echo -e "          2. Repo is private — re-run with a token (repo scope):" >&2
-    echo -e "               export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx" >&2
-    echo -e "               sudo -E ./install.sh" >&2
+    echo -e "          2. Token lacks sufficient scope — ensure 'repo' or 'read:packages'" >&2
     echo -e "          3. Wrong ref — try: GSS_LIB_REF=main sudo -E ./install.sh" >&2
     echo -e "        Or download the full release package and place lib/ next to install.sh." >&2
     rm -rf "${LIB_DIR}"

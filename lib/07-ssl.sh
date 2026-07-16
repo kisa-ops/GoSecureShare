@@ -7,14 +7,15 @@
 #         → Prints proxy target instructions. No cert files needed.
 #
 # Mode 2: Provide certificate files (corporate CA or purchased cert)
-#         → Prompts for cert, key, CA bundle — separately for Platform
-#           then Recipient.
+#         → Each of the 6 files (cert, key, CA bundle × 2 services) can be
+#           provided as a file path OR by pasting the PEM content directly.
 #         → Validates cert+key pair match.
 #         → Installs host Nginx as TLS terminator.
 #         → Writes TLS virtual hosts with HTTP→301 redirect and OCSP stapling.
 #
 # Sets globals: ENABLE_SSL, SSL_TYPE, PLATFORM_BIND, RECIPIENT_BIND,
-#               PLATFORM_DOMAIN, RECIPIENT_DOMAIN
+#               PLATFORM_DOMAIN, RECIPIENT_DOMAIN,
+#               PLATFORM_CERT_DIR, RECIPIENT_CERT_DIR
 # Sourced by install.sh — do not execute directly.
 # =============================================================================
 
@@ -32,6 +33,92 @@ PLATFORM_DOMAIN="${SERVER_IP}"
 RECIPIENT_DOMAIN="${SERVER_IP}"
 SSL_TYPE="none"
 
+# =============================================================================
+# _prompt_cert_file <label> <dest_path>
+#
+# Prompts the user to provide a PEM file either by:
+#   1) Giving an absolute path to the file on this server
+#   2) Pasting the PEM content directly into the terminal
+#
+# In both cases the content is written to <dest_path>.
+# Retries on invalid input (empty, file not found, not readable,
+# empty paste, paste does not start with -----BEGIN).
+# =============================================================================
+_prompt_cert_file() {
+  local label="$1" dest="$2"
+  local _mode
+
+  while true; do
+    echo ""
+    echo -e "  ${BOLD}${label}${RESET}"
+    echo -e "  ${CYAN}  1) Provide a file path${RESET}   ${DIM}(file must exist on this server)${RESET}"
+    echo -e "  ${CYAN}  2) Paste content${RESET}         ${DIM}(paste PEM block, then type EOF on its own line to finish)${RESET}"
+    read -rp "$(echo -e "  ${BOLD}  Choose 1 or 2 [1]: ${RESET}")" _mode
+    _mode=${_mode:-1}
+
+    case "${_mode}" in
+
+      # -----------------------------------------------------------------------
+      # PATH MODE
+      # -----------------------------------------------------------------------
+      1)
+        local _path
+        while true; do
+          read -rp "$(echo -e "    ${CYAN}Path to ${label}: ${RESET}")" _path
+          _path=$(echo "${_path}" | xargs)   # trim surrounding whitespace
+          if [[ -z "${_path}" ]]; then
+            warn "    Path cannot be empty."
+          elif [[ ! -f "${_path}" ]]; then
+            warn "    File not found: ${_path}"
+          elif [[ ! -r "${_path}" ]]; then
+            warn "    File is not readable: ${_path}"
+          elif ! grep -q 'BEGIN' "${_path}" 2>/dev/null; then
+            warn "    File does not appear to be a PEM file (no -----BEGIN line found)."
+          else
+            cp "${_path}" "${dest}"
+            success "    Copied: ${label} → ${dest}"
+            return 0
+          fi
+        done
+        ;;
+
+      # -----------------------------------------------------------------------
+      # PASTE MODE
+      # -----------------------------------------------------------------------
+      2)
+        echo ""
+        echo -e "  ${YELLOW}Paste the ${label} PEM content below.${RESET}"
+        echo -e "  ${YELLOW}When done, type ${BOLD}EOF${RESET}${YELLOW} on its own line and press Enter.${RESET}"
+        echo ""
+        : > "${dest}"   # truncate/create destination file
+        local _line _got_content=false
+        while IFS= read -r _line; do
+          [[ "${_line}" == "EOF" ]] && break
+          printf '%s\n' "${_line}" >> "${dest}"
+          _got_content=true
+        done
+        if [[ "${_got_content}" == "false" ]] || [[ ! -s "${dest}" ]]; then
+          warn "    No content received — please try again."
+          rm -f "${dest}"
+          continue   # re-show the mode prompt
+        fi
+        if ! grep -q 'BEGIN' "${dest}" 2>/dev/null; then
+          warn "    Pasted content does not look like a PEM file (no -----BEGIN line found)."
+          warn "    Make sure you paste the full PEM block including the header/footer lines."
+          rm -f "${dest}"
+          continue
+        fi
+        success "    Saved: ${label} → ${dest}"
+        return 0
+        ;;
+
+      *)
+        warn "    Invalid choice — enter 1 (path) or 2 (paste)."
+        ;;
+    esac
+  done
+}
+
 if [[ "${_ssl_choice}" == "yes" ]]; then
   ENABLE_SSL=true
 
@@ -44,8 +131,7 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
   echo ""
   echo -e "  ${CYAN}  2) I will provide certificate files (corporate CA or purchased cert)${RESET}"
   echo -e "  ${DIM}     Host Nginx will be installed as TLS terminator.${RESET}"
-  echo -e "  ${DIM}     You will be asked for cert, key, and CA bundle — separately${RESET}"
-  echo -e "  ${DIM}     for Platform and then for Recipient.${RESET}"
+  echo -e "  ${DIM}     For each file you can provide a path or paste the PEM content.${RESET}"
   echo ""
   read -rp "$(echo -e "  ${BOLD}Enter 1 or 2 [1]: ${RESET}")" _ssl_mode
   _ssl_mode=${_ssl_mode:-1}
@@ -79,73 +165,41 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     echo ""
 
   # ---------------------------------------------------------------------------
-  # MODE 2 — Provide certificate files
+  # MODE 2 — Provide certificate files (path or paste)
   # ---------------------------------------------------------------------------
   elif [[ "${_ssl_mode}" == "2" ]]; then
     SSL_TYPE="certfiles"
 
-    # Prompt for a readable file path, retry until valid
-    _prompt_file() {
-      local label="$1" varname="$2"
-      local path
-      while true; do
-        read -rp "$(echo -e "    ${CYAN}${label}: ${RESET}")" path
-        path=$(echo "${path}" | xargs)   # trim whitespace
-        if [[ -z "${path}" ]]; then
-          warn "    Path cannot be empty."
-        elif [[ ! -f "${path}" ]]; then
-          warn "    File not found: ${path}"
-        elif [[ ! -r "${path}" ]]; then
-          warn "    File is not readable: ${path}"
-        else
-          printf -v "${varname}" '%s' "${path}"
-          break
-        fi
-      done
-    }
+    SSL_CERT_DIR="${INSTALL_DIR}/ssl"
+    mkdir -p "${SSL_CERT_DIR}/platform" "${SSL_CERT_DIR}/recipient"
 
     # -- Platform certificates --
     echo ""
     echo -e "  ${BOLD}── Platform certificates (${PLATFORM_DOMAIN}) ──────────────────────────────${RESET}"
-    echo -e "  ${DIM}  Provide absolute paths to the certificate files on this server.${RESET}"
-    echo -e "  ${DIM}  The CA/intermediate bundle should contain the full chain excluding${RESET}"
-    echo -e "  ${DIM}  the leaf cert (or a combined fullchain file is also accepted here).${RESET}"
-    echo ""
-    _prompt_file "Platform — Certificate file        (.crt / .pem)" P_CERT_FILE
-    _prompt_file "Platform — Private key file         (.key / .pem)" P_KEY_FILE
-    _prompt_file "Platform — CA / intermediate bundle (.crt / .pem)" P_CA_FILE
-
-    # -- Recipient certificates --
-    echo ""
-    echo -e "  ${BOLD}── Recipient certificates (${RECIPIENT_DOMAIN}) ─────────────────────────────${RESET}"
-    echo -e "  ${DIM}  You may reuse the same files if you have a wildcard or SAN cert.${RESET}"
-    echo ""
-    _prompt_file "Recipient — Certificate file        (.crt / .pem)" R_CERT_FILE
-    _prompt_file "Recipient — Private key file         (.key / .pem)" R_KEY_FILE
-    _prompt_file "Recipient — CA / intermediate bundle (.crt / .pem)" R_CA_FILE
-
-    # Copy cert files into install dir
-    SSL_CERT_DIR="${INSTALL_DIR}/ssl"
-    mkdir -p "${SSL_CERT_DIR}/platform" "${SSL_CERT_DIR}/recipient"
-
-    cp "${P_CERT_FILE}" "${SSL_CERT_DIR}/platform/cert.pem"
-    cp "${P_KEY_FILE}"  "${SSL_CERT_DIR}/platform/key.pem"
-    cp "${P_CA_FILE}"   "${SSL_CERT_DIR}/platform/ca-bundle.pem"
-    # fullchain = leaf cert + CA bundle (what Nginx ssl_certificate expects)
+    echo -e "  ${DIM}  Three files needed: certificate, private key, and CA/intermediate bundle.${RESET}"
+    echo -e "  ${DIM}  For each file you can provide a path or paste the PEM block directly.${RESET}"
+    _prompt_cert_file "Platform certificate (.crt / .pem)"      "${SSL_CERT_DIR}/platform/cert.pem"
+    _prompt_cert_file "Platform private key (.key / .pem)"      "${SSL_CERT_DIR}/platform/key.pem"
+    _prompt_cert_file "Platform root / CA bundle (.crt / .pem)" "${SSL_CERT_DIR}/platform/ca-bundle.pem"
+    # Build fullchain: leaf cert + CA bundle (required by Nginx ssl_certificate)
     cat "${SSL_CERT_DIR}/platform/cert.pem" \
         "${SSL_CERT_DIR}/platform/ca-bundle.pem" \
         > "${SSL_CERT_DIR}/platform/fullchain.pem"
     chmod 600 "${SSL_CERT_DIR}/platform/key.pem"
-    success "  Platform certificates copied."
+    success "  Platform certificates saved."
 
-    cp "${R_CERT_FILE}" "${SSL_CERT_DIR}/recipient/cert.pem"
-    cp "${R_KEY_FILE}"  "${SSL_CERT_DIR}/recipient/key.pem"
-    cp "${R_CA_FILE}"   "${SSL_CERT_DIR}/recipient/ca-bundle.pem"
+    # -- Recipient certificates --
+    echo ""
+    echo -e "  ${BOLD}── Recipient certificates (${RECIPIENT_DOMAIN}) ─────────────────────────────${RESET}"
+    echo -e "  ${DIM}  You may reuse the same files/content if you have a wildcard or SAN cert.${RESET}"
+    _prompt_cert_file "Recipient certificate (.crt / .pem)"      "${SSL_CERT_DIR}/recipient/cert.pem"
+    _prompt_cert_file "Recipient private key (.key / .pem)"      "${SSL_CERT_DIR}/recipient/key.pem"
+    _prompt_cert_file "Recipient root / CA bundle (.crt / .pem)" "${SSL_CERT_DIR}/recipient/ca-bundle.pem"
     cat "${SSL_CERT_DIR}/recipient/cert.pem" \
         "${SSL_CERT_DIR}/recipient/ca-bundle.pem" \
         > "${SSL_CERT_DIR}/recipient/fullchain.pem"
     chmod 600 "${SSL_CERT_DIR}/recipient/key.pem"
-    success "  Recipient certificates copied."
+    success "  Recipient certificates saved."
 
     PLATFORM_CERT_DIR="${SSL_CERT_DIR}/platform"
     RECIPIENT_CERT_DIR="${SSL_CERT_DIR}/recipient"
