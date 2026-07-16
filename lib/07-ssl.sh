@@ -7,14 +7,19 @@
 #         → Prints proxy target instructions. No cert files needed.
 #
 # Mode 2: Provide certificate files (corporate CA or purchased cert)
-#         → Each of the 6 files (cert, key, CA bundle × 2 services) can be
-#           provided as a file path OR by pasting the PEM content directly.
+#         → Input mode (file path or paste) is asked ONCE per service.
+#         → Recipient can reuse platform certs (wildcard / SAN).
 #         → Validates cert+key pair match.
 #         → Installs host Nginx as TLS terminator.
 #         → Writes TLS virtual hosts with HTTP→301 redirect and OCSP stapling.
+#         → Docker nginx containers bind to internal ports 8181/8282 only.
+#           Host Nginx proxies HTTPS → http://127.0.0.1:8181|8282.
+#           PLATFORM_HTTP_PORT and RECIPIENT_HTTP_PORT are overridden to
+#           these values so .env and docker-compose stay consistent.
 #
 # Sets globals: ENABLE_SSL, SSL_TYPE, PLATFORM_BIND, RECIPIENT_BIND,
 #               PLATFORM_DOMAIN, RECIPIENT_DOMAIN,
+#               PLATFORM_HTTP_PORT, RECIPIENT_HTTP_PORT (certfiles mode),
 #               PLATFORM_CERT_DIR, RECIPIENT_CERT_DIR
 # Sourced by install.sh — do not execute directly.
 # =============================================================================
@@ -33,67 +38,58 @@ PLATFORM_DOMAIN="${SERVER_IP}"
 RECIPIENT_DOMAIN="${SERVER_IP}"
 SSL_TYPE="none"
 
+# Internal ports used when host Nginx is the TLS terminator (SSL mode 2).
+# Must not clash with 80/443 which host Nginx owns.
+SSL_INTERNAL_PLATFORM_PORT=8181
+SSL_INTERNAL_RECIPIENT_PORT=8282
+
 # =============================================================================
-# _prompt_cert_file <label> <dest_path>
+# _prompt_cert_file <label> <dest_path> <mode>
 #
-# Prompts the user to provide a PEM file either by:
-#   1) Giving an absolute path to the file on this server
-#   2) Pasting the PEM content directly into the terminal
-#
-# In both cases the content is written to <dest_path>.
-# Retries on invalid input (empty, file not found, not readable,
-# empty paste, paste does not start with -----BEGIN).
+# mode 1 = file path, mode 2 = paste
+# Mode is resolved once by the caller and passed here — no per-file prompt.
 # =============================================================================
 _prompt_cert_file() {
-  local label="$1" dest="$2"
-  local _mode
+  local label="$1" dest="$2" mode="$3"
 
-  while true; do
-    echo ""
-    echo -e "  ${BOLD}${label}${RESET}"
-    echo -e "  ${CYAN}  1) Provide a file path${RESET}   ${DIM}(file must exist on this server)${RESET}"
-    echo -e "  ${CYAN}  2) Paste content${RESET}         ${DIM}(paste PEM block, press Enter, type EOF, press Enter)${RESET}"
-    read -rp "$(echo -e "  ${BOLD}  Choose 1 or 2 [1]: ${RESET}")" _mode
-    _mode=${_mode:-1}
+  case "${mode}" in
+    # -------------------------------------------------------------------------
+    # PATH MODE
+    # -------------------------------------------------------------------------
+    1)
+      while true; do
+        read -rp "$(echo -e "    ${CYAN}Path to ${label}: ${RESET}")" _path
+        _path=$(echo "${_path}" | xargs)
+        if [[ -z "${_path}" ]]; then
+          warn "    Path cannot be empty."
+        elif [[ ! -f "${_path}" ]]; then
+          warn "    File not found: ${_path}"
+        elif [[ ! -r "${_path}" ]]; then
+          warn "    File is not readable: ${_path}"
+        elif ! grep -q 'BEGIN' "${_path}" 2>/dev/null; then
+          warn "    File does not appear to be a PEM file (no -----BEGIN line found)."
+        else
+          cp "${_path}" "${dest}"
+          success "    Copied: ${label} → ${dest}"
+          return 0
+        fi
+      done
+      ;;
 
-    case "${_mode}" in
-
-      # -----------------------------------------------------------------------
-      # PATH MODE
-      # -----------------------------------------------------------------------
-      1)
-        local _path
-        while true; do
-          read -rp "$(echo -e "    ${CYAN}Path to ${label}: ${RESET}")" _path
-          _path=$(echo "${_path}" | xargs)
-          if [[ -z "${_path}" ]]; then
-            warn "    Path cannot be empty."
-          elif [[ ! -f "${_path}" ]]; then
-            warn "    File not found: ${_path}"
-          elif [[ ! -r "${_path}" ]]; then
-            warn "    File is not readable: ${_path}"
-          elif ! grep -q 'BEGIN' "${_path}" 2>/dev/null; then
-            warn "    File does not appear to be a PEM file (no -----BEGIN line found)."
-          else
-            cp "${_path}" "${dest}"
-            success "    Copied: ${label} → ${dest}"
-            return 0
-          fi
-        done
-        ;;
-
-      # -----------------------------------------------------------------------
-      # PASTE MODE
-      # -----------------------------------------------------------------------
-      2)
+    # -------------------------------------------------------------------------
+    # PASTE MODE
+    # -------------------------------------------------------------------------
+    2)
+      while true; do
         echo ""
         echo -e "  ${YELLOW}Paste the ${label} PEM content below.${RESET}"
         echo -e "  ${YELLOW}When finished: press ${BOLD}Enter${RESET}${YELLOW}, type ${BOLD}EOF${RESET}${YELLOW}, then press ${BOLD}Enter${RESET}${YELLOW} again.${RESET}"
         echo ""
         : > "${dest}"
-        local _line _got_content=false
+        local _line _trimmed _got_content=false
         while IFS= read -r _line; do
-          [[ "${_line}" == "EOF" ]] && break
+          _trimmed=$(echo "${_line}" | xargs 2>/dev/null || echo "${_line}")
+          [[ "${_trimmed}" == "EOF" ]] && break
           printf '%s\n' "${_line}" >> "${dest}"
           _got_content=true
         done
@@ -110,12 +106,26 @@ _prompt_cert_file() {
         fi
         success "    Saved: ${label} → ${dest}"
         return 0
-        ;;
+      done
+      ;;
+  esac
+}
 
-      *)
-        warn "    Invalid choice — enter 1 (path) or 2 (paste)."
-        ;;
-    esac
+# =============================================================================
+# _ask_input_mode <service_label>
+# Prints prompt, returns mode in global _cert_input_mode (1 or 2).
+# =============================================================================
+_ask_input_mode() {
+  local svc="$1"
+  while true; do
+    echo ""
+    echo -e "  ${BOLD}How will you provide the ${svc} certificate files?${RESET}"
+    echo -e "  ${CYAN}  1) File paths${RESET}   ${DIM}(files must exist on this server)${RESET}"
+    echo -e "  ${CYAN}  2) Paste PEM content${RESET}   ${DIM}(paste each block, type EOF to finish)${RESET}"
+    read -rp "$(echo -e "  ${BOLD}  Choose 1 or 2 [1]: ${RESET}")" _cert_input_mode
+    _cert_input_mode=${_cert_input_mode:-1}
+    [[ "${_cert_input_mode}" == "1" || "${_cert_input_mode}" == "2" ]] && return 0
+    warn "    Invalid choice — enter 1 or 2."
   done
 }
 
@@ -131,7 +141,7 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
   echo ""
   echo -e "  ${CYAN}  2) I will provide certificate files (corporate CA or purchased cert)${RESET}"
   echo -e "  ${DIM}     Host Nginx will be installed as TLS terminator.${RESET}"
-  echo -e "  ${DIM}     For each file you can provide a path or paste the PEM content.${RESET}"
+  echo -e "  ${DIM}     Docker nginx will bind to internal ports 8181 / 8282.${RESET}"
   echo ""
   read -rp "$(echo -e "  ${BOLD}Enter 1 or 2 [1]: ${RESET}")" _ssl_mode
   _ssl_mode=${_ssl_mode:-1}
@@ -143,14 +153,13 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
   [[ -z "${RECIPIENT_DOMAIN}" ]] && error "Recipient domain cannot be empty."
   [[ "${PLATFORM_DOMAIN}" == "${RECIPIENT_DOMAIN}" ]] && error "Platform and Recipient domains must be different."
 
-  PLATFORM_BIND="127.0.0.1:${PLATFORM_HTTP_PORT}"
-  RECIPIENT_BIND="127.0.0.1:${RECIPIENT_HTTP_PORT}"
-
   # ---------------------------------------------------------------------------
   # MODE 1 — Own reverse proxy
   # ---------------------------------------------------------------------------
   if [[ "${_ssl_mode}" == "1" ]]; then
     SSL_TYPE="proxy"
+    PLATFORM_BIND="127.0.0.1:${PLATFORM_HTTP_PORT}"
+    RECIPIENT_BIND="127.0.0.1:${RECIPIENT_HTTP_PORT}"
     echo ""
     success "Docker containers will bind to 127.0.0.1 only."
     info "Configure your reverse proxy to forward traffic to:"
@@ -169,17 +178,29 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
   elif [[ "${_ssl_mode}" == "2" ]]; then
     SSL_TYPE="certfiles"
 
+    # Override port vars to internal values — host Nginx owns 80/443.
+    PLATFORM_HTTP_PORT=${SSL_INTERNAL_PLATFORM_PORT}
+    RECIPIENT_HTTP_PORT=${SSL_INTERNAL_RECIPIENT_PORT}
+    PLATFORM_BIND="127.0.0.1:${PLATFORM_HTTP_PORT}"
+    RECIPIENT_BIND="127.0.0.1:${RECIPIENT_HTTP_PORT}"
+
+    info "Port override: Platform → ${PLATFORM_HTTP_PORT}, Recipient → ${RECIPIENT_HTTP_PORT} (internal, host Nginx proxies to these)."
+
     SSL_CERT_DIR="${INSTALL_DIR}/ssl"
     mkdir -p "${SSL_CERT_DIR}/platform" "${SSL_CERT_DIR}/recipient"
 
     # -- Platform certificates --
     echo ""
     echo -e "  ${BOLD}── Platform certificates (${PLATFORM_DOMAIN}) ──────────────────────────────${RESET}"
-    echo -e "  ${DIM}  Three files needed: certificate, private key, and CA/intermediate bundle.${RESET}"
-    echo -e "  ${DIM}  For each file you can provide a path or paste the PEM block directly.${RESET}"
-    _prompt_cert_file "Platform certificate (.crt / .pem)"      "${SSL_CERT_DIR}/platform/cert.pem"
-    _prompt_cert_file "Platform private key (.key / .pem)"      "${SSL_CERT_DIR}/platform/key.pem"
-    _prompt_cert_file "Platform root / CA bundle (.crt / .pem)" "${SSL_CERT_DIR}/platform/ca-bundle.pem"
+    echo -e "  ${DIM}  Three files needed: certificate, private key, CA/intermediate bundle.${RESET}"
+
+    _ask_input_mode "Platform"
+    _p_mode=${_cert_input_mode}
+
+    _prompt_cert_file "Platform certificate (.crt / .pem)"      "${SSL_CERT_DIR}/platform/cert.pem"      "${_p_mode}"
+    _prompt_cert_file "Platform private key (.key / .pem)"      "${SSL_CERT_DIR}/platform/key.pem"       "${_p_mode}"
+    _prompt_cert_file "Platform CA / intermediate bundle (.pem)" "${SSL_CERT_DIR}/platform/ca-bundle.pem" "${_p_mode}"
+
     cat "${SSL_CERT_DIR}/platform/cert.pem" \
         "${SSL_CERT_DIR}/platform/ca-bundle.pem" \
         > "${SSL_CERT_DIR}/platform/fullchain.pem"
@@ -189,10 +210,25 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     # -- Recipient certificates --
     echo ""
     echo -e "  ${BOLD}── Recipient certificates (${RECIPIENT_DOMAIN}) ─────────────────────────────${RESET}"
-    echo -e "  ${DIM}  You may reuse the same files/content if you have a wildcard or SAN cert.${RESET}"
-    _prompt_cert_file "Recipient certificate (.crt / .pem)"      "${SSL_CERT_DIR}/recipient/cert.pem"
-    _prompt_cert_file "Recipient private key (.key / .pem)"      "${SSL_CERT_DIR}/recipient/key.pem"
-    _prompt_cert_file "Recipient root / CA bundle (.crt / .pem)" "${SSL_CERT_DIR}/recipient/ca-bundle.pem"
+    echo ""
+    read -rp "$(echo -e "  ${BOLD}Use the same certificate files as Platform? (wildcard / SAN cert) (yes/no) [yes]: ${RESET}")" _reuse_certs
+    _reuse_certs=${_reuse_certs:-yes}
+
+    if [[ "${_reuse_certs}" == "yes" ]]; then
+      cp "${SSL_CERT_DIR}/platform/cert.pem"      "${SSL_CERT_DIR}/recipient/cert.pem"
+      cp "${SSL_CERT_DIR}/platform/key.pem"       "${SSL_CERT_DIR}/recipient/key.pem"
+      cp "${SSL_CERT_DIR}/platform/ca-bundle.pem" "${SSL_CERT_DIR}/recipient/ca-bundle.pem"
+      success "  Reusing Platform certificate files for Recipient."
+    else
+      echo -e "  ${DIM}  Provide separate certificate files for ${RECIPIENT_DOMAIN}.${RESET}"
+      _ask_input_mode "Recipient"
+      _r_mode=${_cert_input_mode}
+
+      _prompt_cert_file "Recipient certificate (.crt / .pem)"      "${SSL_CERT_DIR}/recipient/cert.pem"      "${_r_mode}"
+      _prompt_cert_file "Recipient private key (.key / .pem)"      "${SSL_CERT_DIR}/recipient/key.pem"       "${_r_mode}"
+      _prompt_cert_file "Recipient CA / intermediate bundle (.pem)" "${SSL_CERT_DIR}/recipient/ca-bundle.pem" "${_r_mode}"
+    fi
+
     cat "${SSL_CERT_DIR}/recipient/cert.pem" \
         "${SSL_CERT_DIR}/recipient/ca-bundle.pem" \
         > "${SSL_CERT_DIR}/recipient/fullchain.pem"
@@ -235,7 +271,6 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
 
     # NOTE: 'listen 443 ssl http2' is used instead of standalone 'http2 on;'
     # for compatibility with nginx 1.24 shipped in Ubuntu LTS.
-    # nginx 1.25.1+ accepts both forms; 'http2 on;' fails on 1.24.
     info "Writing host Nginx TLS configs..."
     cat > /etc/nginx/sites-available/gss-platform <<NGINXEOF
 server {
