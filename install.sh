@@ -14,9 +14,16 @@
 #   Recipient (external share UI):  HTTP 80    →  HTTPS 443 (behind host Nginx)
 #
 # VERSION PINNING
-#   By default this script auto-detects the latest stable SemVer release.
+#   By default this script auto-detects the latest stable SemVer release
+#   from the GitHub Releases API (kisa-ops/GoSecureShare).
 #   To install a specific version:
 #     GSS_VERSION=2.3.1 sudo ./install.sh
+#
+#   The version is used to pull pinned image tags from GHCR:
+#     ghcr.io/kisa-ops/gosecureshare-api-platform:<version>
+#     ghcr.io/kisa-ops/gosecureshare-api-recipient:<version>
+#     ghcr.io/kisa-ops/gosecureshare-frontend-platform:<version>
+#     ghcr.io/kisa-ops/gosecureshare-frontend-recipient:<version>
 #
 # DB FILES (init.sql + docker-migrate.sh)
 #   Resolution order (first match wins):
@@ -25,7 +32,8 @@
 #   Override path: GSS_DB_DIR=/path/to/db sudo ./install.sh
 #
 # AUTHENTICATION
-#   Always prompted interactively (GHCR_USERNAME + GHCR_TOKEN).
+#   A GitHub Personal Access Token (PAT) with read:packages scope is required
+#   to pull images from GHCR. You will be prompted for it during install.
 #   Cannot be skipped via environment variables.
 #
 # SSL OPTIONS (prompted during install):
@@ -62,25 +70,28 @@ echo ""
 
 # =============================================================================
 # GHCR CREDENTIALS
-# Always prompted — no environment variable shortcut.
+# A GitHub PAT with read:packages scope is required to pull images.
+# GHCR_USERNAME can be any valid GitHub username — it is not authoritative;
+# the PAT (GHCR_TOKEN) alone controls access.
 # Collected before lib bootstrap so the token is available for
 # private-repo lib fetching AND for docker pull in 04-auth-pull.sh.
 # =============================================================================
-echo -e "${BOLD}── GHCR Credentials ────────────────────────────────────────────${RESET}"
+echo -e "${BOLD}── GHCR Credentials ───────────────────────────────────────────────${RESET}"
 echo -e "  ${CYAN}GoSecureShare images are hosted on GitHub Container Registry (GHCR).${RESET}"
-echo -e "  ${CYAN}A GitHub username and a Personal Access Token (PAT) with at least${RESET}"
-echo -e "  ${CYAN}'read:packages' scope are required to pull the images.${RESET}"
+echo -e "  ${CYAN}A Personal Access Token (PAT) with 'read:packages' scope is required${RESET}"
+echo -e "  ${CYAN}to pull images. Your GitHub username is needed alongside the token.${RESET}"
+echo -e "  ${CYAN}Generate a PAT at: https://github.com/settings/tokens${RESET}"
 echo ""
 
 while true; do
-  read -rp "$(echo -e "  ${BOLD}GitHub username (GHCR_USERNAME): ${RESET}")" GHCR_USERNAME
+  read -rp "$(echo -e "  ${BOLD}Your GitHub username (GHCR_USERNAME): ${RESET}")" GHCR_USERNAME
   GHCR_USERNAME=$(echo "${GHCR_USERNAME}" | xargs)
   [[ -n "${GHCR_USERNAME}" ]] && break
   echo -e "  ${YELLOW}[WARN]${RESET}  Username cannot be empty."
 done
 
 while true; do
-  read -rsp "$(echo -e "  ${BOLD}GitHub PAT    (GHCR_TOKEN):    ${RESET}")" GHCR_TOKEN
+  read -rsp "$(echo -e "  ${BOLD}GitHub PAT with read:packages scope (GHCR_TOKEN): ${RESET}")" GHCR_TOKEN
   echo ""   # newline after silent input
   GHCR_TOKEN=$(echo "${GHCR_TOKEN}" | xargs)
   [[ -n "${GHCR_TOKEN}" ]] && break
@@ -93,7 +104,21 @@ export GHCR_IMAGES_PRIVATE=true
 
 echo ""
 _ok() { echo -e "${GREEN}[OK]${RESET}    $*"; }
-_ok "GHCR credentials captured. GHCR_IMAGES_PRIVATE=true."
+_ok "GHCR credentials captured."
+echo ""
+
+# =============================================================================
+# VERSION NOTICE
+# The version to install is resolved in lib/03-version.sh.
+# It auto-detects the latest stable SemVer release from GitHub Releases.
+# To override: GSS_VERSION=2.3.1 sudo ./install.sh
+# =============================================================================
+if [[ -n "${GSS_VERSION:-}" ]]; then
+  echo -e "  ${CYAN}[INFO]${RESET}  Version override detected: ${BOLD}${GSS_VERSION}${RESET}"
+else
+  echo -e "  ${CYAN}[INFO]${RESET}  Version: auto-detect from latest GitHub Release"
+  echo -e "  ${CYAN}         To pin a version: ${BOLD}GSS_VERSION=x.y.z sudo ./install.sh${RESET}"
+fi
 echo ""
 
 # =============================================================================
@@ -145,7 +170,7 @@ if [[ "${_needs_bootstrap}" == "true" ]]; then
     echo -e "${RED}[ERROR]${RESET} One or more lib files could not be fetched." >&2
     echo -e "        Possible causes:" >&2
     echo -e "          1. No internet access to raw.githubusercontent.com" >&2
-    echo -e "          2. Token lacks sufficient scope — ensure 'repo' or 'read:packages'" >&2
+    echo -e "          2. Token lacks sufficient scope — ensure 'read:packages' scope" >&2
     echo -e "          3. Wrong ref — try: GSS_LIB_REF=main sudo -E ./install.sh" >&2
     echo -e "        Or download the full release package and place lib/ next to install.sh." >&2
     rm -rf "${LIB_DIR}"

@@ -47,6 +47,14 @@ RECIPIENT_DOMAIN=${RECIPIENT_DOMAIN}
 PLATFORM_HTTP_PORT=${PLATFORM_HTTP_PORT}
 RECIPIENT_HTTP_PORT=${RECIPIENT_HTTP_PORT}
 
+# SSL mode — used by the platform API to build correct share URLs.
+# ENABLE_SSL: true | false
+# SSL_TYPE:   none | proxy | certfiles
+ENABLE_SSL=${ENABLE_SSL}
+SSL_TYPE=${SSL_TYPE}
+# PLATFORM_HTTPS_PORT is only meaningful when SSL_TYPE=certfiles.
+PLATFORM_HTTPS_PORT=${PLATFORM_HTTPS_PORT:-}
+
 DEBUG=false
 ENABLE_SWAGGER=false
 GSS_DEV_AUTO_RESET_DB=false
