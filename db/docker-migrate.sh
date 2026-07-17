@@ -14,6 +14,22 @@
 # =============================================================================
 set -e
 
+# ---------------------------------------------------------------------------
+# SCHEMA VERSION — bump this whenever the DB schema changes.
+# Format: MAJOR.MINOR.PATCH  (same SemVer conventions as INSTALLER_VERSION)
+#   MAJOR — destructive changes (column renames, table drops)
+#   MINOR — additive changes (new tables, new columns with defaults)
+#   PATCH — grant/ownership fixes, index additions, data-only changes
+#
+# This value is:
+#   • Echoed at start so every docker compose up log shows the schema version
+#   • Recorded in gss_platform.schema_migrations as 'schema-version-<VER>'
+#     so you can query it at any time:
+#       SELECT filename, applied_at FROM gss_platform.schema_migrations
+#       WHERE filename LIKE 'schema-version-%' ORDER BY applied_at DESC LIMIT 1;
+# ---------------------------------------------------------------------------
+SCHEMA_VERSION="1.1.0"
+
 PGHOST="${POSTGRES_HOST:-postgres}"
 PGPORT=5432
 PGUSER="$POSTGRES_USER"
@@ -26,6 +42,9 @@ RECP_PW="$GSS_RECIPIENT_DB_PASSWORD"
 run()  { psql -h "$PGHOST" -p $PGPORT -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=1 "$@"; }
 run0() { psql -h "$PGHOST" -p $PGPORT -U "$PGUSER" -d "$PGDB" -v ON_ERROR_STOP=0 "$@"; }
 
+echo "[migrate] ============================================================"
+echo "[migrate] GoSecureShare DB Bootstrap  —  schema version: ${SCHEMA_VERSION}"
+echo "[migrate] ============================================================"
 echo "[migrate] Waiting for PostgreSQL..."
 until pg_isready -h "$PGHOST" -p $PGPORT -U "$PGUSER"; do sleep 1; done
 echo "[migrate] PostgreSQL is ready."
@@ -339,7 +358,23 @@ fi
 
 # ---------------------------------------------------------------------------
 # Step 9: Record in migration tracking table
+# Records both the script name (idempotent marker) and the current schema
+# version so you can always query which version is running:
+#   SELECT filename, applied_at
+#   FROM gss_platform.schema_migrations
+#   WHERE filename LIKE 'schema-version-%'
+#   ORDER BY applied_at DESC LIMIT 1;
 # ---------------------------------------------------------------------------
-run -c "INSERT INTO gss_platform.schema_migrations (filename) VALUES ('docker-migrate.sh') ON CONFLICT DO NOTHING;"
+echo "[migrate] Step 9: Recording migration markers"
+run <<SQL
+INSERT INTO gss_platform.schema_migrations (filename)
+  VALUES ('docker-migrate.sh')
+  ON CONFLICT DO NOTHING;
+INSERT INTO gss_platform.schema_migrations (filename, applied_at)
+  VALUES ('schema-version-${SCHEMA_VERSION}', now())
+  ON CONFLICT (filename) DO UPDATE SET applied_at = now();
+SQL
 
-echo "[migrate] Bootstrap complete."
+echo "[migrate] ============================================================"
+echo "[migrate] Bootstrap complete.  Schema version: ${SCHEMA_VERSION}"
+echo "[migrate] ============================================================"

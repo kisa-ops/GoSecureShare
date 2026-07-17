@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # GoSecureShare — SSL Certificate Update Script
+# Script version: 1.1.0
 #
 # Usage:  chmod +x update-ssl.sh && sudo ./update-ssl.sh
 #
@@ -22,6 +23,9 @@
 # =============================================================================
 set -euo pipefail
 
+# Script-level version (bumped alongside INSTALLER_VERSION in 00-globals.sh)
+SCRIPT_VERSION="1.1.0"
+
 RED=$'\033[0;31m'   GREEN=$'\033[0;32m'  YELLOW=$'\033[1;33m'
 CYAN=$'\033[0;36m'  BOLD=$'\033[1m'      RESET=$'\033[0m'
 DIM=$'\033[2m'
@@ -40,19 +44,49 @@ error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
 [[ $EUID -ne 0 ]] && error "Please run as root: sudo ./update-ssl.sh"
 
 # ---------------------------------------------------------------------------
-# Banner
+# Locate install directory early (needed to read installed version from .env)
+# ---------------------------------------------------------------------------
+INSTALL_DIR="${GSS_INSTALL_DIR:-/opt/gosecureshare}"
+
+# ---------------------------------------------------------------------------
+# Read installed version from .env (written by install.sh via 09-write-files.sh)
+# ---------------------------------------------------------------------------
+_INSTALLED_INSTALLER_VER="unknown"
+_INSTALLED_AT="unknown"
+_INSTALLED_APP_VER="unknown"
+if [[ -f "${INSTALL_DIR}/.env" ]]; then
+  _INSTALLED_INSTALLER_VER=$(grep -E '^GSS_INSTALLER_VERSION=' "${INSTALL_DIR}/.env" \
+    | head -1 | cut -d'=' -f2 | tr -d '"' || echo "unknown")
+  _INSTALLED_AT=$(grep -E '^GSS_INSTALLED_AT=' "${INSTALL_DIR}/.env" \
+    | head -1 | cut -d'=' -f2- | tr -d '"' || echo "unknown")
+  _INSTALLED_APP_VER=$(grep -E '^GSS_VERSION=' "${INSTALL_DIR}/.env" \
+    | head -1 | cut -d'=' -f2 | tr -d '"' || echo "unknown")
+fi
+
+# ---------------------------------------------------------------------------
+# Banner — shows both the script version and the installed installer version
 # ---------------------------------------------------------------------------
 echo ""
 echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..60})╗${RESET}"
 echo -e "${BOLD}${GREEN}║      GoSecureShare — SSL Certificate Update              ║${RESET}"
 echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..60})╝${RESET}"
 echo ""
+echo -e "  ${BOLD}Script version:${RESET}      ${SCRIPT_VERSION}"
+echo -e "  ${BOLD}Installed by:${RESET}        installer v${_INSTALLED_INSTALLER_VER}  (app: ${_INSTALLED_APP_VER})"
+echo -e "  ${BOLD}Installed at:${RESET}        ${_INSTALLED_AT}"
+echo ""
+
+# Version mismatch warning
+if [[ "${SCRIPT_VERSION}" != "${_INSTALLED_INSTALLER_VER}" && "${_INSTALLED_INSTALLER_VER}" != "unknown" ]]; then
+  warn "Script version (${SCRIPT_VERSION}) differs from installer version used at install time (${_INSTALLED_INSTALLER_VER})."
+  warn "This is usually fine, but if you see unexpected behaviour, re-download update-ssl.sh"
+  warn "from the same release that was used to install GoSecureShare."
+  echo ""
+fi
 
 # ---------------------------------------------------------------------------
-# Locate install directory
+# Check install dir and .env
 # ---------------------------------------------------------------------------
-INSTALL_DIR="${GSS_INSTALL_DIR:-/opt/gosecureshare}"
-
 [[ ! -d "${INSTALL_DIR}" ]] && \
   error "Install directory not found: ${INSTALL_DIR}\n        Re-run install.sh first, or set GSS_INSTALL_DIR."
 

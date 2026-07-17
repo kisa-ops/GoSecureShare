@@ -49,6 +49,21 @@
 # =============================================================================
 set -euo pipefail
 
+# ---------------------------------------------------------------------------
+# Read INSTALLER_VERSION from 00-globals.sh if lib/ is already present,
+# otherwise fall back to a build-time placeholder so the banner still shows
+# something meaningful before bootstrap.
+# ---------------------------------------------------------------------------
+_SCRIPT_DIR_EARLY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_GLOBALS_EARLY="${_SCRIPT_DIR_EARLY}/lib/00-globals.sh"
+if [[ -f "${_GLOBALS_EARLY}" ]]; then
+  # shellcheck source=/dev/null
+  INSTALLER_VERSION=$(grep -E '^INSTALLER_VERSION=' "${_GLOBALS_EARLY}" \
+    | head -1 | cut -d'"' -f2 || echo "unknown")
+else
+  INSTALLER_VERSION="(fetching...)"
+fi
+
 # Colours used in bootstrap messages (before 00-globals.sh is sourced)
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
 CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
@@ -65,6 +80,7 @@ echo ""
 echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..60})╗${RESET}"
 echo -e "${BOLD}${GREEN}║      GoSecureShare — Automated Installer                   ║${RESET}"
 echo -e "${BOLD}${GREEN}║      Self-Hosted Zero-Knowledge Secret Sharing             ║${RESET}"
+echo -e "${BOLD}${GREEN}║      Installer version: ${INSTALLER_VERSION}$(printf ' %.0s' $(seq 1 $((33 - ${#INSTALLER_VERSION}))))║${RESET}"
 echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..60})╝${RESET}"
 echo ""
 
@@ -179,6 +195,12 @@ if [[ "${_needs_bootstrap}" == "true" ]]; then
   chmod +x "${LIB_DIR}"/*.sh
   echo -e "${GREEN}[OK]${RESET}    All lib files ready."
   echo ""
+fi
+
+# After bootstrap, re-read INSTALLER_VERSION from the now-present 00-globals.sh
+if [[ -f "${LIB_DIR}/00-globals.sh" ]]; then
+  INSTALLER_VERSION=$(grep -E '^INSTALLER_VERSION=' "${LIB_DIR}/00-globals.sh" \
+    | head -1 | cut -d'"' -f2 || echo "unknown")
 fi
 
 # Verify lib dir is complete before sourcing

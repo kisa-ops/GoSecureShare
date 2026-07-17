@@ -123,6 +123,14 @@ services:
       APP_ROLE: platform
       DATABASE_URL: postgresql+asyncpg://\${GSS_PLATFORM_DB_USER}:\${GSS_PLATFORM_DB_PASSWORD}@postgres:5432/\${POSTGRES_DB}
       DATABASE_SUPERUSER_URL: postgresql+asyncpg://\${POSTGRES_USER}:\${POSTGRES_PASSWORD}@postgres:5432/\${POSTGRES_DB}
+      # Explicitly set SSL + domain vars so they are always injected even if
+      # env_file parsing drops them (e.g. after a post-install .env backfill).
+      ENABLE_SSL: \${ENABLE_SSL}
+      SSL_TYPE: \${SSL_TYPE}
+      PLATFORM_DOMAIN: \${PLATFORM_DOMAIN}
+      RECIPIENT_DOMAIN: \${RECIPIENT_DOMAIN}
+      PLATFORM_HTTP_PORT: \${PLATFORM_HTTP_PORT}
+      RECIPIENT_HTTP_PORT: \${RECIPIENT_HTTP_PORT}
     depends_on:
       postgres:
         condition: service_healthy
@@ -741,14 +749,17 @@ NGINXEOF
 success "Nginx configs regenerated."
 
 # ── Restart affected containers ───────────────────────────────────────────────
+# Use 'up -d --force-recreate' (not 'restart') so Docker picks up the new
+# environment variables from .env rather than reusing the cached env from the
+# previous container lifecycle.
 info "Restarting nginx containers to apply new config..."
 cd "${INSTALL_DIR}"
-docker compose restart nginx_platform nginx_recipient
+docker compose up -d --force-recreate nginx_platform nginx_recipient
 success "Nginx containers restarted."
 
-info "Restarting api_platform to pick up new ENABLE_SSL / SSL_TYPE from .env..."
-docker compose restart api_platform
-success "api_platform restarted."
+info "Force-recreating api_platform to pick up new ENABLE_SSL / SSL_TYPE from .env..."
+docker compose up -d --force-recreate api_platform
+success "api_platform restarted with updated environment."
 
 echo ""
 echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..62})╗${RESET}"
