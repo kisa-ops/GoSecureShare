@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
 # 09-write-files.sh — Write .env, docker-compose.yml, nginx confs,
-#                     upgrade.sh, stop.sh, start.sh, backup.sh
+#                     upgrade.sh, stop.sh, start.sh, backup.sh, update-ssl.sh
 # Sourced by install.sh — do not execute directly.
 # =============================================================================
 
@@ -230,32 +230,46 @@ success "docker-compose.yml written."
 
 # -----------------------------------------------------------------------------
 # Nginx reverse proxy configs (inside Docker)
+#
+# X-Forwarded-Proto handling:
+#   certfiles / proxy modes — the TLS terminator (host Nginx or upstream proxy)
+#     talks to the Docker nginx container over plain HTTP, so
+#     $http_x_forwarded_proto is EMPTY at this layer. Hardcode "https" so
+#     the FastAPI backend sees the correct scheme and builds https:// share URLs.
+#   none (HTTP-only) — pass through whatever the client sends (or empty).
 # -----------------------------------------------------------------------------
 info "Writing Nginx reverse proxy configs..."
-cat > "${INSTALL_DIR}/nginx/platform.conf" <<'NGINXEOF'
+
+if [[ "${SSL_TYPE}" == "certfiles" || "${SSL_TYPE}" == "proxy" ]]; then
+  _forwarded_proto_value="https"
+else
+  _forwarded_proto_value="\$http_x_forwarded_proto"
+fi
+
+cat > "${INSTALL_DIR}/nginx/platform.conf" <<NGINXEOF
 upstream platform_api { server api_platform:8000; }
 upstream platform_ui  { server nextjs_platform:3000; }
 server {
     listen 80;
     client_max_body_size 50M;
-    location /api/          { proxy_pass http://platform_api; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto; }
-    location /healthz        { proxy_pass http://platform_api; proxy_set_header Host $host; }
+    location /api/          { proxy_pass http://platform_api; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto ${_forwarded_proto_value}; }
+    location /healthz        { proxy_pass http://platform_api; proxy_set_header Host \$host; }
     location /api/docs       { return 404; }
     location /openapi.json   { return 404; }
-    location /               { proxy_pass http://platform_ui;  proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto; }
+    location /               { proxy_pass http://platform_ui;  proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto ${_forwarded_proto_value}; }
 }
 NGINXEOF
 
-cat > "${INSTALL_DIR}/nginx/recipient.conf" <<'NGINXEOF'
+cat > "${INSTALL_DIR}/nginx/recipient.conf" <<NGINXEOF
 upstream recipient_api { server api_recipient:8000; }
 upstream recipient_ui  { server nextjs_recipient:3000; }
 server {
     listen 80;
     client_max_body_size 50M;
-    location /api/          { proxy_pass http://recipient_api; proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto; }
+    location /api/          { proxy_pass http://recipient_api; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto ${_forwarded_proto_value}; }
     location /api/docs       { return 404; }
     location /openapi.json   { return 404; }
-    location /               { proxy_pass http://recipient_ui;  proxy_set_header Host $host; proxy_set_header X-Real-IP $remote_addr; proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto; }
+    location /               { proxy_pass http://recipient_ui;  proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto ${_forwarded_proto_value}; }
 }
 NGINXEOF
 success "Nginx configs written."
@@ -278,9 +292,10 @@ cat > "${INSTALL_DIR}/upgrade.sh" <<'UPGRADEEOF'
 #   2. Snapshot           — docker-compose.yml + .env backed up before any change
 #   3. DB backup          — full pg_dump before pulling new images
 #   4. Pull first         — all new images pulled before touching the live stack
-#   5. Health checks      — all 4 services polled after upgrade
-#   6. Auto-rollback      — snapshot restored + old images restarted on failure
-#   7. Version pinned     — .env updated ONLY after successful health verification
+#   5. .env backfill      — missing SSL keys added interactively
+#   6. Health checks      — all 4 services polled after upgrade
+#   7. Auto-rollback      — snapshot restored + old images restarted on failure
+#   8. Version pinned     — .env updated ONLY after successful health verification
 # =============================================================================
 set -euo pipefail
 
@@ -327,7 +342,7 @@ POSTGRES_DB=$(grep '^POSTGRES_DB=' "${ENV_FILE}" 2>/dev/null \
 info "Current version: ${CURRENT_VERSION}"
 info "Install dir:     ${INSTALL_DIR}"
 
-step "── Step 1/7: Resolve target version"
+step "── Step 1/8: Resolve target version"
 
 if [[ -n "${1:-}" ]]; then
   TARGET_VERSION="${1#v}"
@@ -361,7 +376,7 @@ fi
 echo ""
 echo -e "  ${BOLD}Upgrade plan:${RESET}  ${YELLOW}${CURRENT_VERSION}${RESET}  →  ${GREEN}${TARGET_VERSION}${RESET}"
 
-step "── Step 2/7: Pre-flight checks"
+step "── Step 2/8: Pre-flight checks"
 
 docker info &>/dev/null || error "Docker daemon is not running."
 success "Docker daemon is running."
@@ -385,7 +400,7 @@ else
   success "Stack is running (${_running} containers)."
 fi
 
-step "── Step 3/7: GHCR authentication"
+step "── Step 3/8: GHCR authentication"
 
 if [[ -z "${GHCR_USERNAME:-}" ]]; then
   read -rp "$(echo -e "  ${BOLD}GitHub username (GHCR_USERNAME): ${RESET}")" GHCR_USERNAME
@@ -407,14 +422,15 @@ echo -e "  ${BOLD}This will:${RESET}"
 echo -e "  ${DIM}  1. Snapshot current config to ${SNAPSHOT_DIR}/${RESET}"
 echo -e "  ${DIM}  2. Back up the database to ${SNAPSHOT_DIR}/db-backup-${CURRENT_VERSION}.sql${RESET}"
 echo -e "  ${DIM}  3. Pull new images (${TARGET_VERSION})${RESET}"
-echo -e "  ${DIM}  4. Restart the stack on new images${RESET}"
-echo -e "  ${DIM}  5. Verify all services are healthy${RESET}"
-echo -e "  ${DIM}  6. Auto-rollback to ${CURRENT_VERSION} if health checks fail${RESET}"
+echo -e "  ${DIM}  4. Backfill any missing .env keys (interactive)${RESET}"
+echo -e "  ${DIM}  5. Restart the stack on new images${RESET}"
+echo -e "  ${DIM}  6. Verify all services are healthy${RESET}"
+echo -e "  ${DIM}  7. Auto-rollback to ${CURRENT_VERSION} if health checks fail${RESET}"
 echo ""
 read -rp "$(echo -e "  ${BOLD}Type 'yes' to proceed with the upgrade: ${RESET}")" _confirm
 [[ "${_confirm}" == "yes" ]] || { info "Upgrade aborted. No changes made."; exit 0; }
 
-step "── Step 4/7: Snapshot current state"
+step "── Step 4/8: Snapshot current state"
 
 mkdir -p "${SNAPSHOT_DIR}"
 cp "${COMPOSE_FILE}" "${SNAPSHOT_DIR}/docker-compose.yml.${CURRENT_VERSION}"
@@ -435,7 +451,7 @@ else
   [[ "${_skip_backup:-no}" == "yes" ]] || { info "Upgrade aborted."; exit 0; }
 fi
 
-step "── Step 5/7: Pull new images (${TARGET_VERSION})"
+step "── Step 5/8: Pull new images (${TARGET_VERSION})"
 
 _pull_failed=false
 for img in "${IMAGES[@]}"; do
@@ -453,7 +469,55 @@ if [[ "${_pull_failed}" == "true" ]]; then
 fi
 success "All images pulled successfully."
 
-step "── Step 6/7: Apply upgrade"
+step "── Step 6/8: Apply upgrade"
+
+# -----------------------------------------------------------------------------
+# Backfill .env keys that may be absent in installs predating SSL support.
+# When missing, interactively ask the user whether this server uses HTTPS
+# and which SSL_TYPE to set — so share URLs are built correctly by the API.
+# -----------------------------------------------------------------------------
+if ! grep -q '^ENABLE_SSL=' "${ENV_FILE}" 2>/dev/null; then
+  echo ""
+  echo -e "  ${BOLD}${YELLOW}SSL configuration is missing from .env (pre-SSL install detected).${RESET}"
+  echo -e "  ${DIM}The platform API needs this to generate correct share URLs.${RESET}"
+  echo ""
+  echo -e "  Does this server use HTTPS?"
+  echo -e "  ${DIM}  [1] No  — plain HTTP only (no SSL)${RESET}"
+  echo -e "  ${DIM}  [2] Yes — behind a reverse proxy / Cloudflare (SSL_TYPE=proxy)${RESET}"
+  echo -e "  ${DIM}  [3] Yes — host Nginx with certificate files (SSL_TYPE=certfiles)${RESET}"
+  echo ""
+  read -rp "$(echo -e "  ${BOLD}Enter choice [1/2/3]: ${RESET}")" _ssl_choice
+
+  case "${_ssl_choice}" in
+    2)
+      _backfill_enable_ssl="true"
+      _backfill_ssl_type="proxy"
+      ;;
+    3)
+      _backfill_enable_ssl="true"
+      _backfill_ssl_type="certfiles"
+      ;;
+    *)
+      _backfill_enable_ssl="false"
+      _backfill_ssl_type="none"
+      ;;
+  esac
+
+  {
+    echo ""
+    echo "# SSL mode — backfilled by upgrade.sh (was absent in older install)"
+    echo "# ENABLE_SSL: true | false"
+    echo "# SSL_TYPE:   none | proxy | certfiles"
+    echo "ENABLE_SSL=${_backfill_enable_ssl}"
+    echo "SSL_TYPE=${_backfill_ssl_type}"
+    echo "PLATFORM_HTTPS_PORT="
+  } >> "${ENV_FILE}"
+
+  success "SSL keys written: ENABLE_SSL=${_backfill_enable_ssl}  SSL_TYPE=${_backfill_ssl_type}"
+  info    "To change SSL mode after upgrade, run: sudo ${INSTALL_DIR}/update-ssl.sh"
+else
+  success ".env SSL keys already present — no backfill needed."
+fi
 
 for img in "${IMAGES[@]}"; do
   sed -i "s|${REGISTRY}/${NAMESPACE}/${img}:[^ ]*|${REGISTRY}/${NAMESPACE}/${img}:${TARGET_VERSION}|g" \
@@ -466,7 +530,7 @@ info "Restarting stack with new images..."
 docker compose up -d
 success "Stack restarted."
 
-step "── Step 7/7: Health verification"
+step "── Step 7/8: Health verification"
 
 HEALTH_TIMEOUT=120
 HEALTH_INTERVAL=5
@@ -529,6 +593,8 @@ done
 
 [[ "${_health_failed}" == "true" ]] && _rollback
 
+step "── Step 8/8: Finalise"
+
 sed -i "s|^GSS_INSTALLED_VERSION=.*|GSS_INSTALLED_VERSION=${TARGET_VERSION}|" "${ENV_FILE}"
 
 echo ""
@@ -544,6 +610,159 @@ echo ""
 UPGRADEEOF
 chmod +x "${INSTALL_DIR}/upgrade.sh"
 success "upgrade.sh written."
+
+# -----------------------------------------------------------------------------
+# update-ssl.sh
+# -----------------------------------------------------------------------------
+info "Writing ${INSTALL_DIR}/update-ssl.sh ..."
+cat > "${INSTALL_DIR}/update-ssl.sh" <<'UPDATESSLEOF'
+#!/usr/bin/env bash
+# =============================================================================
+# GoSecureShare — SSL Mode Update Script
+#
+# Usage:  sudo ./update-ssl.sh
+#
+# Use this script to:
+#   • Change SSL mode after a fresh install (e.g. none → proxy or certfiles)
+#   • Re-generate nginx configs with the correct X-Forwarded-Proto value
+#   • Restart only the affected containers (api_platform + nginx)
+#
+# SSL types:
+#   none      — plain HTTP, no SSL anywhere
+#   proxy     — HTTPS terminated by Cloudflare / upstream Nginx / HAProxy
+#   certfiles — HTTPS terminated by a host Nginx with certificate files;
+#               Docker nginx sits behind it on a loopback port
+# =============================================================================
+set -euo pipefail
+
+RED=$'\033[0;31m'   GREEN=$'\033[0;32m'  YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'  BOLD=$'\033[1m'      RESET=$'\033[0m'  DIM=$'\033[2m'
+
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
+
+[[ $EUID -ne 0 ]] && error "Please run as root: sudo ./update-ssl.sh"
+
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${INSTALL_DIR}/.env"
+NGINX_PLATFORM="${INSTALL_DIR}/nginx/platform.conf"
+NGINX_RECIPIENT="${INSTALL_DIR}/nginx/recipient.conf"
+
+[[ -f "${ENV_FILE}" ]] || error ".env not found. Is GoSecureShare installed at ${INSTALL_DIR}?"
+
+CURRENT_SSL_TYPE=$(grep '^SSL_TYPE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "unknown")
+CURRENT_ENABLE_SSL=$(grep '^ENABLE_SSL=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "unknown")
+
+echo ""
+echo -e "${BOLD}${CYAN}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${CYAN}║      GoSecureShare — Update SSL Mode                       ║${RESET}"
+echo -e "${BOLD}${CYAN}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+echo -e "  ${DIM}Current: ENABLE_SSL=${CURRENT_ENABLE_SSL}  SSL_TYPE=${CURRENT_SSL_TYPE}${RESET}"
+echo ""
+
+echo -e "  Select the new SSL mode for this server:"
+echo -e "  ${DIM}  [1] none      — plain HTTP only (no SSL anywhere)${RESET}"
+echo -e "  ${DIM}  [2] proxy     — HTTPS terminated by Cloudflare / upstream proxy${RESET}"
+echo -e "  ${DIM}  [3] certfiles — HTTPS terminated by host Nginx with cert files${RESET}"
+echo ""
+read -rp "$(echo -e "  ${BOLD}Enter choice [1/2/3]: ${RESET}")" _choice
+
+case "${_choice}" in
+  2)
+    NEW_ENABLE_SSL="true"
+    NEW_SSL_TYPE="proxy"
+    ;;
+  3)
+    NEW_ENABLE_SSL="true"
+    NEW_SSL_TYPE="certfiles"
+    ;;
+  *)
+    NEW_ENABLE_SSL="false"
+    NEW_SSL_TYPE="none"
+    ;;
+esac
+
+echo ""
+echo -e "  ${BOLD}New SSL mode:${RESET}  ENABLE_SSL=${NEW_ENABLE_SSL}  SSL_TYPE=${NEW_SSL_TYPE}"
+echo ""
+read -rp "$(echo -e "  ${BOLD}Apply this change? (yes/no) [no]: ${RESET}")" _confirm
+[[ "${_confirm}" == "yes" ]] || { info "No changes made."; exit 0; }
+
+# ── Update .env ───────────────────────────────────────────────────────────────
+if grep -q '^ENABLE_SSL=' "${ENV_FILE}"; then
+  sed -i "s|^ENABLE_SSL=.*|ENABLE_SSL=${NEW_ENABLE_SSL}|" "${ENV_FILE}"
+else
+  echo "ENABLE_SSL=${NEW_ENABLE_SSL}" >> "${ENV_FILE}"
+fi
+
+if grep -q '^SSL_TYPE=' "${ENV_FILE}"; then
+  sed -i "s|^SSL_TYPE=.*|SSL_TYPE=${NEW_SSL_TYPE}|" "${ENV_FILE}"
+else
+  echo "SSL_TYPE=${NEW_SSL_TYPE}" >> "${ENV_FILE}"
+fi
+success ".env updated."
+
+# ── Regenerate nginx configs ──────────────────────────────────────────────────
+if [[ "${NEW_SSL_TYPE}" == "certfiles" || "${NEW_SSL_TYPE}" == "proxy" ]]; then
+  _proto="https"
+else
+  _proto="\$http_x_forwarded_proto"
+fi
+
+cat > "${NGINX_PLATFORM}" <<NGINXEOF
+upstream platform_api { server api_platform:8000; }
+upstream platform_ui  { server nextjs_platform:3000; }
+server {
+    listen 80;
+    client_max_body_size 50M;
+    location /api/          { proxy_pass http://platform_api; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto ${_proto}; }
+    location /healthz        { proxy_pass http://platform_api; proxy_set_header Host \$host; }
+    location /api/docs       { return 404; }
+    location /openapi.json   { return 404; }
+    location /               { proxy_pass http://platform_ui;  proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto ${_proto}; }
+}
+NGINXEOF
+
+cat > "${NGINX_RECIPIENT}" <<NGINXEOF
+upstream recipient_api { server api_recipient:8000; }
+upstream recipient_ui  { server nextjs_recipient:3000; }
+server {
+    listen 80;
+    client_max_body_size 50M;
+    location /api/          { proxy_pass http://recipient_api; proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto ${_proto}; }
+    location /api/docs       { return 404; }
+    location /openapi.json   { return 404; }
+    location /               { proxy_pass http://recipient_ui;  proxy_set_header Host \$host; proxy_set_header X-Real-IP \$remote_addr; proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for; proxy_set_header X-Forwarded-Proto ${_proto}; }
+}
+NGINXEOF
+success "Nginx configs regenerated."
+
+# ── Restart affected containers ───────────────────────────────────────────────
+info "Restarting nginx containers to apply new config..."
+cd "${INSTALL_DIR}"
+docker compose restart nginx_platform nginx_recipient
+success "Nginx containers restarted."
+
+info "Restarting api_platform to pick up new ENABLE_SSL / SSL_TYPE from .env..."
+docker compose restart api_platform
+success "api_platform restarted."
+
+echo ""
+echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${GREEN}║  ✓  SSL mode updated successfully.                         ║${RESET}"
+echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+echo -e "  ${BOLD}ENABLE_SSL${RESET} = ${NEW_ENABLE_SSL}"
+echo -e "  ${BOLD}SSL_TYPE${RESET}   = ${NEW_SSL_TYPE}"
+echo ""
+echo -e "  ${DIM}Check share URL generation: log in → create a secret → verify the link scheme.${RESET}"
+echo ""
+UPDATESSLEOF
+chmod +x "${INSTALL_DIR}/update-ssl.sh"
+success "update-ssl.sh written."
 
 # -----------------------------------------------------------------------------
 # stop.sh
@@ -815,7 +1034,7 @@ cat > "${INSTALL_DIR}/backup.sh" <<'BACKUPEOF'
 #   3. Runtime config  — docker-compose.yml
 #   4. Nginx configs   — nginx/platform.conf, nginx/recipient.conf
 #   5. DB bootstrap    — db/docker-migrate.sh, db/init.sql
-#   6. Runtime scripts — upgrade.sh, start.sh, stop.sh, backup.sh
+#   6. Runtime scripts — upgrade.sh, start.sh, stop.sh, backup.sh, update-ssl.sh
 #
 # Output:
 #   /opt/gosecureshare/backups/gss-backup-<version>-<timestamp>.tar.gz
@@ -934,6 +1153,7 @@ _copy "${INSTALL_DIR}/upgrade.sh"                  "scripts/upgrade.sh"
 _copy "${INSTALL_DIR}/start.sh"                    "scripts/start.sh"
 _copy "${INSTALL_DIR}/stop.sh"                     "scripts/stop.sh"
 _copy "${INSTALL_DIR}/backup.sh"                   "scripts/backup.sh"
+_copy "${INSTALL_DIR}/update-ssl.sh"               "scripts/update-ssl.sh"
 
 # =============================================================================
 # Manifest

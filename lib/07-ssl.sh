@@ -8,7 +8,7 @@
 #
 # Mode 2: Provide certificate files (corporate CA or purchased cert)
 #         → Input mode (file path or paste) is asked ONCE per service.
-#         → Recipient can reuse platform certs (wildcard / SAN).
+#         → Recipient can reuse platform certs (wildcard / SAN)
 #         → Validates cert+key pair match BEFORE fullchain build and Nginx start.
 #         → Installs host Nginx as TLS terminator.
 #         → Recipient  → port 443  (standard HTTPS, clean share links)
@@ -25,6 +25,10 @@
 #               PLATFORM_CERT_DIR, RECIPIENT_CERT_DIR
 # Sourced by install.sh — do not execute directly.
 # =============================================================================
+
+# Detect the server's primary IP — used as the default domain in HTTP-only mode.
+SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "127.0.0.1")
+[[ -z "${SERVER_IP}" ]] && SERVER_IP="127.0.0.1"
 
 echo ""
 echo -e "${BOLD}── SSL / HTTPS Setup ──────────────────────────────────────────${RESET}"
@@ -264,7 +268,6 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     _prompt_cert_file "Platform private key (.key / .pem)"       "${SSL_CERT_DIR}/platform/key.pem"       "${_p_mode}"
     _prompt_cert_file "Platform CA / intermediate bundle (.pem)"  "${SSL_CERT_DIR}/platform/ca-bundle.pem" "${_p_mode}"
 
-    # FIX: validate BEFORE building fullchain and BEFORE touching Nginx
     _validate_cert_key_pair "Platform" "${SSL_CERT_DIR}/platform"
 
     cat "${SSL_CERT_DIR}/platform/cert.pem" \
@@ -282,6 +285,10 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     echo ""
     read -rp "$(echo -e "  ${BOLD}Use the same certificate files as Platform? (wildcard / SAN cert) (yes/no) [yes]: ${RESET}")" _reuse_certs
     _reuse_certs=${_reuse_certs:-yes}
+    # Normalize to lowercase so y/Y/Yes/YES all resolve correctly.
+    _reuse_certs=$(echo "${_reuse_certs}" | tr '[:upper:]' '[:lower:]')
+    # Treat any "y"-prefixed answer as "yes", anything else as "no".
+    [[ "${_reuse_certs}" == y* ]] && _reuse_certs="yes" || _reuse_certs="no"
 
     if [[ "${_reuse_certs}" == "yes" ]]; then
       cp "${SSL_CERT_DIR}/platform/cert.pem"      "${SSL_CERT_DIR}/recipient/cert.pem"
@@ -300,7 +307,6 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
       _prompt_cert_file "Recipient private key (.key / .pem)"       "${SSL_CERT_DIR}/recipient/key.pem"       "${_r_mode}"
       _prompt_cert_file "Recipient CA / intermediate bundle (.pem)"  "${SSL_CERT_DIR}/recipient/ca-bundle.pem" "${_r_mode}"
 
-      # FIX: validate BEFORE building fullchain and BEFORE touching Nginx
       _validate_cert_key_pair "Recipient" "${SSL_CERT_DIR}/recipient"
 
       cat "${SSL_CERT_DIR}/recipient/cert.pem" \
@@ -356,8 +362,11 @@ server {
     ssl_ciphers             HIGH:!aNULL:!MD5;
     ssl_session_cache       shared:SSL_P:10m;
     ssl_session_timeout     1d;
+    # ssl_stapling on/off depends on whether your CA provides an OCSP responder.
+    # Enabled here for public CAs; harmlessly ignored if OCSP is unavailable.
+    # ssl_stapling_verify is intentionally omitted — it causes Nginx reload
+    # errors when the OCSP responder is unreachable (corporate / offline CAs).
     ssl_stapling            on;
-    ssl_stapling_verify     on;
 
     client_max_body_size 50M;
 
@@ -392,8 +401,11 @@ server {
     ssl_ciphers             HIGH:!aNULL:!MD5;
     ssl_session_cache       shared:SSL_R:10m;
     ssl_session_timeout     1d;
+    # ssl_stapling on/off depends on whether your CA provides an OCSP responder.
+    # Enabled here for public CAs; harmlessly ignored if OCSP is unavailable.
+    # ssl_stapling_verify is intentionally omitted — it causes Nginx reload
+    # errors when the OCSP responder is unreachable (corporate / offline CAs).
     ssl_stapling            on;
-    ssl_stapling_verify     on;
 
     client_max_body_size 50M;
 
@@ -423,7 +435,19 @@ NGINXEOF
   fi
 
 else
-  # HTTP-only — Docker containers bind on all interfaces
+  # ---------------------------------------------------------------------------
+  # HTTP-only — ask for domains (defaulting to detected server IP) and bind
+  # Docker containers on all interfaces.
+  # ---------------------------------------------------------------------------
+  echo ""
+  echo -e "  ${DIM}HTTP-only mode. Domains default to the server IP (${SERVER_IP}).${RESET}"
+  echo -e "  ${DIM}You can enter hostnames if DNS is already configured.${RESET}"
+  echo ""
+  read -rp "$(echo -e "  ${BOLD}Platform  domain/IP [${SERVER_IP}]: ${RESET}")" PLATFORM_DOMAIN
+  PLATFORM_DOMAIN=${PLATFORM_DOMAIN:-${SERVER_IP}}
+  read -rp "$(echo -e "  ${BOLD}Recipient domain/IP [${SERVER_IP}]: ${RESET}")" RECIPIENT_DOMAIN
+  RECIPIENT_DOMAIN=${RECIPIENT_DOMAIN:-${SERVER_IP}}
+
   PLATFORM_BIND="0.0.0.0:${PLATFORM_HTTP_PORT}"
   RECIPIENT_BIND="0.0.0.0:${RECIPIENT_HTTP_PORT}"
   warn "Skipping SSL setup. GoSecureShare will run on plain HTTP."
