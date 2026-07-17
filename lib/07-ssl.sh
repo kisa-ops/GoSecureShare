@@ -11,15 +11,17 @@
 #         → Recipient can reuse platform certs (wildcard / SAN).
 #         → Validates cert+key pair match.
 #         → Installs host Nginx as TLS terminator.
-#         → Writes TLS virtual hosts with HTTP→301 redirect and OCSP stapling.
-#         → Docker nginx containers bind to internal ports 8181/8282 only.
-#           Host Nginx proxies HTTPS → http://127.0.0.1:8181|8282.
-#           PLATFORM_HTTP_PORT and RECIPIENT_HTTP_PORT are overridden to
-#           these values so .env and docker-compose stay consistent.
+#         → Recipient  → port 443  (standard HTTPS, clean share links)
+#         → Platform   → port 8443 (non-standard, internal use; user-prompted)
+#         → Docker nginx containers bind to 127.0.0.1:8181 / 127.0.0.1:8282
+#           Host Nginx proxies HTTPS → those internal ports.
+#           PLATFORM_HTTP_PORT / RECIPIENT_HTTP_PORT overridden to internal
+#           values so .env and docker-compose stay consistent.
 #
 # Sets globals: ENABLE_SSL, SSL_TYPE, PLATFORM_BIND, RECIPIENT_BIND,
 #               PLATFORM_DOMAIN, RECIPIENT_DOMAIN,
 #               PLATFORM_HTTP_PORT, RECIPIENT_HTTP_PORT (certfiles mode),
+#               PLATFORM_HTTPS_PORT (certfiles mode),
 #               PLATFORM_CERT_DIR, RECIPIENT_CERT_DIR
 # Sourced by install.sh — do not execute directly.
 # =============================================================================
@@ -38,8 +40,8 @@ PLATFORM_DOMAIN="${SERVER_IP}"
 RECIPIENT_DOMAIN="${SERVER_IP}"
 SSL_TYPE="none"
 
-# Internal ports used when host Nginx is the TLS terminator (SSL mode 2).
-# Must not clash with 80/443 which host Nginx owns.
+# Internal Docker ports — host Nginx proxies to these in certfiles mode.
+# Must not clash with 80/443/8443 which host Nginx owns.
 SSL_INTERNAL_PLATFORM_PORT=8181
 SSL_INTERNAL_RECIPIENT_PORT=8282
 
@@ -53,9 +55,6 @@ _prompt_cert_file() {
   local label="$1" dest="$2" mode="$3"
 
   case "${mode}" in
-    # -------------------------------------------------------------------------
-    # PATH MODE
-    # -------------------------------------------------------------------------
     1)
       while true; do
         read -rp "$(echo -e "    ${CYAN}Path to ${label}: ${RESET}")" _path
@@ -75,10 +74,6 @@ _prompt_cert_file() {
         fi
       done
       ;;
-
-    # -------------------------------------------------------------------------
-    # PASTE MODE
-    # -------------------------------------------------------------------------
     2)
       while true; do
         echo ""
@@ -113,7 +108,7 @@ _prompt_cert_file() {
 
 # =============================================================================
 # _ask_input_mode <service_label>
-# Prints prompt, returns mode in global _cert_input_mode (1 or 2).
+# Sets global _cert_input_mode to 1 (path) or 2 (paste).
 # =============================================================================
 _ask_input_mode() {
   local svc="$1"
@@ -141,7 +136,8 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
   echo ""
   echo -e "  ${CYAN}  2) I will provide certificate files (corporate CA or purchased cert)${RESET}"
   echo -e "  ${DIM}     Host Nginx will be installed as TLS terminator.${RESET}"
-  echo -e "  ${DIM}     Docker nginx will bind to internal ports 8181 / 8282.${RESET}"
+  echo -e "  ${DIM}     Recipient → port 443 (standard HTTPS, clean share links).${RESET}"
+  echo -e "  ${DIM}     Platform  → port 8443 (non-standard, internal use).${RESET}"
   echo ""
   read -rp "$(echo -e "  ${BOLD}Enter 1 or 2 [1]: ${RESET}")" _ssl_mode
   _ssl_mode=${_ssl_mode:-1}
@@ -178,13 +174,29 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
   elif [[ "${_ssl_mode}" == "2" ]]; then
     SSL_TYPE="certfiles"
 
-    # Override port vars to internal values — host Nginx owns 80/443.
+    # Prompt for platform HTTPS port (non-standard, internal use).
+    # Recipient always gets 443 for clean external share links.
+    echo ""
+    echo -e "  ${DIM}Recipient will be served on port 443 (standard HTTPS).${RESET}"
+    echo -e "  ${DIM}Platform is for internal use and runs on a non-standard HTTPS port.${RESET}"
+    while true; do
+      read -rp "$(echo -e "  ${BOLD}Platform HTTPS port [8443]: ${RESET}")" PLATFORM_HTTPS_PORT
+      PLATFORM_HTTPS_PORT=${PLATFORM_HTTPS_PORT:-8443}
+      [[ "${PLATFORM_HTTPS_PORT}" =~ ^[0-9]+$ ]] && \
+        (( PLATFORM_HTTPS_PORT >= 1024 && PLATFORM_HTTPS_PORT <= 65535 )) && \
+        (( PLATFORM_HTTPS_PORT != 443 )) && break
+      warn "  Must be 1024–65535 and not 443."
+    done
+
+    # Override internal port vars — host Nginx owns 80/443/PLATFORM_HTTPS_PORT.
     PLATFORM_HTTP_PORT=${SSL_INTERNAL_PLATFORM_PORT}
     RECIPIENT_HTTP_PORT=${SSL_INTERNAL_RECIPIENT_PORT}
     PLATFORM_BIND="127.0.0.1:${PLATFORM_HTTP_PORT}"
     RECIPIENT_BIND="127.0.0.1:${RECIPIENT_HTTP_PORT}"
 
-    info "Port override: Platform → ${PLATFORM_HTTP_PORT}, Recipient → ${RECIPIENT_HTTP_PORT} (internal, host Nginx proxies to these)."
+    info "Port layout:"
+    echo -e "  ${DIM}    Recipient  → https://${RECIPIENT_DOMAIN}           (port 443, Docker internal :${RECIPIENT_HTTP_PORT})${RESET}"
+    echo -e "  ${DIM}    Platform   → https://${PLATFORM_DOMAIN}:${PLATFORM_HTTPS_PORT}  (Docker internal :${PLATFORM_HTTP_PORT})${RESET}"
 
     SSL_CERT_DIR="${INSTALL_DIR}/ssl"
     mkdir -p "${SSL_CERT_DIR}/platform" "${SSL_CERT_DIR}/recipient"
@@ -197,9 +209,9 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     _ask_input_mode "Platform"
     _p_mode=${_cert_input_mode}
 
-    _prompt_cert_file "Platform certificate (.crt / .pem)"      "${SSL_CERT_DIR}/platform/cert.pem"      "${_p_mode}"
-    _prompt_cert_file "Platform private key (.key / .pem)"      "${SSL_CERT_DIR}/platform/key.pem"       "${_p_mode}"
-    _prompt_cert_file "Platform CA / intermediate bundle (.pem)" "${SSL_CERT_DIR}/platform/ca-bundle.pem" "${_p_mode}"
+    _prompt_cert_file "Platform certificate (.crt / .pem)"       "${SSL_CERT_DIR}/platform/cert.pem"      "${_p_mode}"
+    _prompt_cert_file "Platform private key (.key / .pem)"       "${SSL_CERT_DIR}/platform/key.pem"       "${_p_mode}"
+    _prompt_cert_file "Platform CA / intermediate bundle (.pem)"  "${SSL_CERT_DIR}/platform/ca-bundle.pem" "${_p_mode}"
 
     cat "${SSL_CERT_DIR}/platform/cert.pem" \
         "${SSL_CERT_DIR}/platform/ca-bundle.pem" \
@@ -224,9 +236,9 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
       _ask_input_mode "Recipient"
       _r_mode=${_cert_input_mode}
 
-      _prompt_cert_file "Recipient certificate (.crt / .pem)"      "${SSL_CERT_DIR}/recipient/cert.pem"      "${_r_mode}"
-      _prompt_cert_file "Recipient private key (.key / .pem)"      "${SSL_CERT_DIR}/recipient/key.pem"       "${_r_mode}"
-      _prompt_cert_file "Recipient CA / intermediate bundle (.pem)" "${SSL_CERT_DIR}/recipient/ca-bundle.pem" "${_r_mode}"
+      _prompt_cert_file "Recipient certificate (.crt / .pem)"       "${SSL_CERT_DIR}/recipient/cert.pem"      "${_r_mode}"
+      _prompt_cert_file "Recipient private key (.key / .pem)"       "${SSL_CERT_DIR}/recipient/key.pem"       "${_r_mode}"
+      _prompt_cert_file "Recipient CA / intermediate bundle (.pem)"  "${SSL_CERT_DIR}/recipient/ca-bundle.pem" "${_r_mode}"
     fi
 
     cat "${SSL_CERT_DIR}/recipient/cert.pem" \
@@ -269,17 +281,19 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     mkdir -p /etc/nginx/sites-available /etc/nginx/sites-enabled
     rm -f /etc/nginx/sites-enabled/default
 
-    # NOTE: 'listen 443 ssl http2' is used instead of standalone 'http2 on;'
-    # for compatibility with nginx 1.24 shipped in Ubuntu LTS.
+    # NOTE: 'listen 443 ssl http2' / 'listen PORT ssl http2' is used instead
+    # of standalone 'http2 on;' for nginx 1.24 compatibility (Ubuntu LTS).
     info "Writing host Nginx TLS configs..."
+
+    # Platform — non-standard HTTPS port, internal use
     cat > /etc/nginx/sites-available/gss-platform <<NGINXEOF
 server {
     listen 80;
     server_name ${PLATFORM_DOMAIN};
-    return 301 https://\$host\$request_uri;
+    return 301 https://\$host:${PLATFORM_HTTPS_PORT}\$request_uri;
 }
 server {
-    listen 443 ssl http2;
+    listen ${PLATFORM_HTTPS_PORT} ssl http2;
     server_name ${PLATFORM_DOMAIN};
 
     ssl_certificate         ${PLATFORM_CERT_DIR}/fullchain.pem;
@@ -307,6 +321,7 @@ server {
 }
 NGINXEOF
 
+    # Recipient — standard port 443, clean external share links
     cat > /etc/nginx/sites-available/gss-recipient <<NGINXEOF
 server {
     listen 80;

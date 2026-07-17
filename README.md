@@ -163,13 +163,44 @@ sudo -E ./install.sh
 
 ---
 
-## Upgrading
+## Platform Administration
 
-The installer writes an `upgrade.sh` helper to `/opt/gosecureshare/`:
+The installer writes five management scripts to `/opt/gosecureshare/`. All scripts must be run as `root` from that directory.
+
+```
+/opt/gosecureshare/
+├── upgrade.sh   ← Upgrade to a newer version (safe, with auto-rollback)
+├── stop.sh      ← Graceful shutdown for maintenance
+├── start.sh     ← Start / resume after maintenance
+└── backup.sh    ← Full backup: database + config + scripts
+```
+
+---
+
+### Upgrading (`upgrade.sh`)
+
+`upgrade.sh` upgrades GoSecureShare to a newer version with full safety guarantees. If anything goes wrong after the new images are applied, it **automatically rolls back** to the previous running version.
+
+#### Safety steps performed
+
+| Step | What happens |
+|---|---|
+| **1. Pre-flight** | Checks Docker daemon is running, ≥2 GB free disk, GHCR reachable, stack running |
+| **2. Snapshot** | Copies `docker-compose.yml` + `.env` to `.upgrade-snapshot/` before any change |
+| **3. DB backup** | Full `pg_dump` into `.upgrade-snapshot/db-backup-<version>.sql` |
+| **4. Pull first** | All 4 new images pulled completely before the live stack is touched |
+| **5. Apply** | Image tags patched in `docker-compose.yml`, stack restarted |
+| **6. Health checks** | All 4 app containers polled for healthy status (120 s timeout each) |
+| **7. Auto-rollback** | On any health failure: snapshot restored, old images re-pulled, stack restarted on old version |
+| **8. Version pin** | `GSS_INSTALLED_VERSION` in `.env` updated **only** after all health checks pass |
+
+#### Usage
 
 ```bash
-# Upgrade to latest release (auto-detected)
-cd /opt/gosecureshare && sudo ./upgrade.sh
+cd /opt/gosecureshare
+
+# Upgrade to the latest stable release (auto-detected)
+sudo ./upgrade.sh
 
 # Upgrade to a specific version
 sudo ./upgrade.sh 2.5.0
@@ -177,10 +208,198 @@ sudo ./upgrade.sh 2.5.0
 # Upgrade with private registry credentials
 export GHCR_USERNAME=your-github-username
 export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-cd /opt/gosecureshare && sudo -E ./upgrade.sh
+sudo -E ./upgrade.sh
+
+# Upgrade to specific version with credentials
+export GHCR_USERNAME=your-github-username
+export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
+sudo -E ./upgrade.sh 2.5.0
 ```
 
-`upgrade.sh` re-authenticates to GHCR, pulls the new images, patches `docker-compose.yml` in-place, restarts the stack, and records the new version in `.env`.
+#### What is kept after a successful upgrade
+
+```
+/opt/gosecureshare/.upgrade-snapshot/
+├── docker-compose.yml.<previous-version>   ← previous compose file
+├── .env.<previous-version>                  ← previous .env (chmod 600)
+└── db-backup-<previous-version>.sql         ← full database dump
+```
+
+These files are kept permanently so you can manually restore to a previous version if needed. They are **not** automatically deleted.
+
+#### Manual rollback (if needed)
+
+```bash
+# Restore config files
+cp /opt/gosecureshare/.upgrade-snapshot/docker-compose.yml.<version> /opt/gosecureshare/docker-compose.yml
+cp /opt/gosecureshare/.upgrade-snapshot/.env.<version>                /opt/gosecureshare/.env
+chmod 600 /opt/gosecureshare/.env
+
+# Restart on the old version
+cd /opt/gosecureshare && sudo docker compose up -d
+
+# Optionally restore the database
+docker exec -i gosecureshare-postgres psql -U gss_superuser gosecureshare \
+  < /opt/gosecureshare/.upgrade-snapshot/db-backup-<version>.sql
+```
+
+---
+
+### Stopping for maintenance (`stop.sh`)
+
+`stop.sh` gracefully shuts down the stack. It stops app containers first, waits for in-flight requests to drain, then stops the database last.
+
+#### What it does
+
+| Step | Action |
+|---|---|
+| **1** | Stops host Nginx (if running in certfiles/proxy SSL mode) so no new connections arrive. Leaves a `.nginx-was-running` marker for `start.sh`. |
+| **2** | Waits a drain period for in-flight requests to complete (default: 10 s). |
+| **3** | Stops app containers in safe order: nginx → frontend → api. |
+| **4** | Stops PostgreSQL last, after all app containers are down. |
+| **5** | Prints final `docker compose ps` status table. |
+
+#### Usage
+
+```bash
+cd /opt/gosecureshare
+
+# Standard graceful stop
+sudo ./stop.sh
+
+# Skip drain wait (emergency stop)
+GSS_DRAIN_SECONDS=0 sudo ./stop.sh
+
+# Longer drain for busy servers
+GSS_DRAIN_SECONDS=30 sudo ./stop.sh
+```
+
+> Data is fully preserved. PostgreSQL volumes are **not** removed.
+
+---
+
+### Starting after maintenance (`start.sh`)
+
+`start.sh` starts the full stack and confirms all services are healthy before returning.
+
+#### What it does
+
+| Step | Action |
+|---|---|
+| **1** | Pre-flight checks: Docker daemon running, `.env` and `docker-compose.yml` present. |
+| **2** | `docker compose up -d` — starts all containers. |
+| **3** | Resumes host Nginx if the `.nginx-was-running` marker was left by `stop.sh`. Runs `nginx -t` config test first. |
+| **4** | Polls all 4 app containers until healthy (120 s timeout). Exits with error if any remain unhealthy. |
+| **5** | Prints Platform and Recipient access URLs on success. |
+
+#### Usage
+
+```bash
+cd /opt/gosecureshare
+
+# Start the stack
+sudo ./start.sh
+```
+
+#### Typical maintenance window flow
+
+```bash
+# 1. Take a backup before starting work
+sudo ./backup.sh
+
+# 2. Stop the stack
+sudo ./stop.sh
+
+# 3. Perform maintenance (OS patches, disk resize, etc.)
+
+# 4. Start the stack and verify health
+sudo ./start.sh
+```
+
+---
+
+### Backup (`backup.sh`)
+
+`backup.sh` creates a complete, timestamped backup archive of the database and all configuration files. The archive is self-contained — enough to fully restore a fresh installation.
+
+#### What is backed up
+
+| Artifact | File in archive | Notes |
+|---|---|---|
+| **Database** | `database.sql.gz` | Full `pg_dump`, gzip-compressed |
+| **Environment** | `config/.env` | `chmod 600` preserved inside archive |
+| **Compose file** | `config/docker-compose.yml` | Exact image tags and port bindings |
+| **Nginx configs** | `config/nginx/platform.conf`, `recipient.conf` | Reverse proxy routing rules |
+| **DB bootstrap** | `db/docker-migrate.sh`, `db/init.sql` | Schema + seed for a fresh DB |
+| **Scripts** | `scripts/upgrade.sh`, `start.sh`, `stop.sh`, `backup.sh` | Management scripts |
+| **Manifest** | `MANIFEST.txt` | Version, timestamp, hostname, file list |
+
+#### Output
+
+```
+/opt/gosecureshare/backups/
+└── gss-backup-<version>-<timestamp>.tar.gz    ← chmod 600 (root-only)
+```
+
+#### Retention
+
+The script automatically **prunes old archives**, keeping only the N most recent. Default is 7; override with `GSS_BACKUP_KEEP`.
+
+#### Usage
+
+```bash
+cd /opt/gosecureshare
+
+# Standard backup
+sudo ./backup.sh
+
+# Keep last 14 backups instead of 7
+GSS_BACKUP_KEEP=14 sudo ./backup.sh
+
+# Write backups to an external mount
+GSS_BACKUP_DIR=/mnt/nas/gss-backups sudo ./backup.sh
+
+# Skip gzip compression (faster, larger files)
+sudo ./backup.sh --no-compress
+```
+
+#### Automating with cron
+
+Add to `/etc/cron.d/gosecureshare-backup` (daily at 02:00):
+
+```
+0 2 * * * root /opt/gosecureshare/backup.sh >> /var/log/gss-backup.log 2>&1
+```
+
+#### Restoring the database from a backup
+
+```bash
+# Extract the database dump from the archive
+tar -xzf /opt/gosecureshare/backups/gss-backup-2.5.0-20260716T020000Z.tar.gz \
+    --strip-components=1 '*/database.sql.gz'
+
+# Decompress
+gunzip database.sql.gz
+
+# Restore (stack must be running with postgres healthy)
+docker exec -i gosecureshare-postgres psql \
+    -U gss_superuser gosecureshare < database.sql
+```
+
+---
+
+### Quick reference
+
+| Task | Command |
+|---|---|
+| Upgrade to latest | `cd /opt/gosecureshare && sudo ./upgrade.sh` |
+| Upgrade to version | `sudo ./upgrade.sh 2.5.0` |
+| Stop for maintenance | `sudo ./stop.sh` |
+| Start after maintenance | `sudo ./start.sh` |
+| Take a manual backup | `sudo ./backup.sh` |
+| Check container status | `sudo docker compose ps` |
+| Tail all logs | `sudo docker compose logs -f` |
+| Tail one service | `sudo docker compose logs -f api_platform` |
 
 ---
 
@@ -251,37 +470,6 @@ Host machine
 | `gosecureshare-frontend-recipient:<ver>` | `ghcr.io/kisa-ops` | `gosecureshare-ui-recipient` |
 | `postgres:16-alpine` | Docker Hub | `gosecureshare-postgres` + `gosecureshare-db-migrate` |
 | `nginx:1.27-alpine` | Docker Hub | `gosecureshare-nginx-platform` + `gosecureshare-nginx-recipient` |
-
----
-
-## Post-Install Management
-
-All commands run from `/opt/gosecureshare/`:
-
-```bash
-cd /opt/gosecureshare
-
-# Upgrade to latest release
-sudo ./upgrade.sh
-
-# Upgrade to a specific version
-sudo ./upgrade.sh 2.5.0
-
-# Check container status
-sudo docker compose ps
-
-# Tail live logs
-sudo docker compose logs -f
-
-# Tail logs for a single service
-sudo docker compose logs -f api_platform
-
-# Stop the stack (data preserved)
-sudo docker compose down
-
-# Stop and DELETE all data ⚠️
-sudo docker compose down -v
-```
 
 ---
 

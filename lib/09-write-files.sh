@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # =============================================================================
-# 09-write-files.sh — Write .env, docker-compose.yml, nginx confs, upgrade.sh
+# 09-write-files.sh — Write .env, docker-compose.yml, nginx confs,
+#                     upgrade.sh, stop.sh, start.sh, backup.sh
 # Sourced by install.sh — do not execute directly.
 # =============================================================================
 
@@ -257,60 +258,757 @@ success "Nginx configs written."
 info "Writing ${INSTALL_DIR}/upgrade.sh ..."
 cat > "${INSTALL_DIR}/upgrade.sh" <<'UPGRADEEOF'
 #!/usr/bin/env bash
+# =============================================================================
+# GoSecureShare — Safe Upgrade Script
+#
+# Usage:  sudo ./upgrade.sh [version]
+#   sudo ./upgrade.sh           → auto-detect latest stable release
+#   sudo ./upgrade.sh 2.5.0     → upgrade to a specific version
+#
+# Safety features:
+#   1. Pre-flight checks  — disk space, Docker, GHCR connectivity
+#   2. Snapshot           — docker-compose.yml + .env backed up before any change
+#   3. DB backup          — full pg_dump before pulling new images
+#   4. Pull first         — all new images pulled before touching the live stack
+#   5. Health checks      — all 4 services polled after upgrade
+#   6. Auto-rollback      — snapshot restored + old images restarted on failure
+#   7. Version pinned     — .env updated ONLY after successful health verification
+# =============================================================================
 set -euo pipefail
+
+RED=$'\033[0;31m'   GREEN=$'\033[0;32m'  YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'  BOLD=$'\033[1m'      RESET=$'\033[0m'  DIM=$'\033[2m'
+
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
+step()    { echo -e "\n${BOLD}$*${RESET}"; }
+
+[[ $EUID -ne 0 ]] && error "Please run as root: sudo ./upgrade.sh"
+
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${INSTALL_DIR}/.env"
+COMPOSE_FILE="${INSTALL_DIR}/docker-compose.yml"
+SNAPSHOT_DIR="${INSTALL_DIR}/.upgrade-snapshot"
 GITHUB_REPO="kisa-ops/GoSecureShare"
 NAMESPACE="kisa-ops"
 REGISTRY="ghcr.io"
-RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
-CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
-info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
-success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
-error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
-[[ $EUID -ne 0 ]] && error "Please run as root: sudo ./upgrade.sh"
-INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ENV_FILE="${INSTALL_DIR}/.env"
-[[ -f "${ENV_FILE}" ]] || error "No .env found at ${ENV_FILE}. Is GoSecureShare installed?"
-CURRENT_VERSION=$(grep '^GSS_INSTALLED_VERSION=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 || echo "unknown")
+IMAGES=("gosecureshare-api-platform" "gosecureshare-api-recipient" "gosecureshare-frontend-platform" "gosecureshare-frontend-recipient")
+
+echo ""
+echo -e "${BOLD}${CYAN}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${CYAN}║      GoSecureShare — Safe Upgrade                          ║${RESET}"
+echo -e "${BOLD}${CYAN}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+
+[[ -f "${ENV_FILE}" ]]     || error ".env not found. Is GoSecureShare installed at ${INSTALL_DIR}?"
+[[ -f "${COMPOSE_FILE}" ]] || error "docker-compose.yml not found at ${INSTALL_DIR}."
+
+CURRENT_VERSION=$(grep '^GSS_INSTALLED_VERSION=' "${ENV_FILE}" 2>/dev/null \
+                  | cut -d= -f2 | tr -d '"' || echo "unknown")
+DB_HOST_PORT=$(grep '^DB_HOST_PORT=' "${ENV_FILE}" 2>/dev/null \
+               | cut -d= -f2 | tr -d '"' || echo "5434")
+POSTGRES_USER=$(grep '^POSTGRES_USER=' "${ENV_FILE}" 2>/dev/null \
+                | cut -d= -f2 | tr -d '"' || echo "gss_superuser")
+POSTGRES_PASSWORD=$(grep '^POSTGRES_PASSWORD=' "${ENV_FILE}" 2>/dev/null \
+                    | cut -d= -f2 | tr -d '"' || echo "")
+POSTGRES_DB=$(grep '^POSTGRES_DB=' "${ENV_FILE}" 2>/dev/null \
+              | cut -d= -f2 | tr -d '"' || echo "gosecureshare")
+
+info "Current version: ${CURRENT_VERSION}"
+info "Install dir:     ${INSTALL_DIR}"
+
+step "── Step 1/7: Resolve target version"
+
 if [[ -n "${1:-}" ]]; then
   TARGET_VERSION="${1#v}"
+  info "Target version specified: ${TARGET_VERSION}"
 else
-  info "Checking latest release..."
-  curl_auth=()
-  [[ -n "${GHCR_TOKEN:-}" ]] && curl_auth=(-H "Authorization: Bearer ${GHCR_TOKEN}")
-  TARGET_VERSION=$(curl -fsSL --connect-timeout 8 \
+  info "Fetching latest stable release from GitHub..."
+  _curl_auth=()
+  [[ -n "${GHCR_TOKEN:-}" ]] && _curl_auth=(-H "Authorization: Bearer ${GHCR_TOKEN}")
+  TARGET_VERSION=$(curl -fsSL --connect-timeout 10 \
     -H "Accept: application/vnd.github+json" \
-    "${curl_auth[@]}" \
+    "${_curl_auth[@]}" \
     "https://api.github.com/repos/${GITHUB_REPO}/releases/latest" 2>/dev/null \
     | grep '"tag_name"' \
     | sed 's/.*"tag_name": "\(.*\)".*/\1/' \
     | tr -d '[:space:]' \
     | sed 's/^v//' || echo "")
-  [[ -z "${TARGET_VERSION}" || ! "${TARGET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+  if [[ -z "${TARGET_VERSION}" || ! "${TARGET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     error "Could not resolve latest release. Specify manually: sudo ./upgrade.sh 2.5.0"
+  fi
+  info "Latest stable release: ${TARGET_VERSION}"
 fi
+
+[[ ! "${TARGET_VERSION}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] && \
+  error "Invalid version format: '${TARGET_VERSION}'. Expected x.y.z (e.g. 2.5.0)"
+
 if [[ "${CURRENT_VERSION}" == "${TARGET_VERSION}" ]]; then
   info "Already on version ${TARGET_VERSION}. Nothing to do."
   exit 0
 fi
-echo -e "  ${YELLOW}${BOLD}Upgrading ${CURRENT_VERSION} → ${TARGET_VERSION}. Proceed? (type 'yes'): ${RESET}"
-read -r _confirm
-[[ "${_confirm}" == "yes" ]] || { info "Aborted."; exit 0; }
-if [[ -n "${GHCR_USERNAME:-}" && -n "${GHCR_TOKEN:-}" ]]; then
-  info "Logging in to GHCR as ${GHCR_USERNAME}..."
-  echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin || error "GHCR login failed."
+
+echo ""
+echo -e "  ${BOLD}Upgrade plan:${RESET}  ${YELLOW}${CURRENT_VERSION}${RESET}  →  ${GREEN}${TARGET_VERSION}${RESET}"
+
+step "── Step 2/7: Pre-flight checks"
+
+docker info &>/dev/null || error "Docker daemon is not running."
+success "Docker daemon is running."
+
+_free_kb=$(df -k "${INSTALL_DIR}" | awk 'NR==2 {print $4}')
+_free_gb=$(( _free_kb / 1024 / 1024 ))
+if (( _free_kb < 2097152 )); then
+  error "Insufficient disk space: ${_free_gb} GB free (need at least 2 GB)."
 fi
-IMAGES=("gosecureshare-api-platform" "gosecureshare-api-recipient" "gosecureshare-frontend-platform" "gosecureshare-frontend-recipient")
+success "Disk space OK: ${_free_gb} GB free."
+
+if ! curl -fsSL --connect-timeout 8 "https://ghcr.io" &>/dev/null; then
+  error "Cannot reach ghcr.io. Check network/firewall and retry."
+fi
+success "GHCR reachable."
+
+_running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep '^gosecureshare-' | wc -l || echo 0)
+if (( _running == 0 )); then
+  warn "No GoSecureShare containers are currently running."
+else
+  success "Stack is running (${_running} containers)."
+fi
+
+step "── Step 3/7: GHCR authentication"
+
+if [[ -z "${GHCR_USERNAME:-}" ]]; then
+  read -rp "$(echo -e "  ${BOLD}GitHub username (GHCR_USERNAME): ${RESET}")" GHCR_USERNAME
+  GHCR_USERNAME=$(echo "${GHCR_USERNAME}" | xargs)
+fi
+if [[ -z "${GHCR_TOKEN:-}" ]]; then
+  read -rsp "$(echo -e "  ${BOLD}GitHub PAT    (GHCR_TOKEN):    ${RESET}")" GHCR_TOKEN
+  echo ""
+  GHCR_TOKEN=$(echo "${GHCR_TOKEN}" | xargs)
+fi
+[[ -z "${GHCR_USERNAME}" || -z "${GHCR_TOKEN}" ]] && error "GHCR credentials are required."
+
+echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin \
+  || error "GHCR login failed. Check credentials."
+success "Logged in to GHCR as ${GHCR_USERNAME}."
+
+echo ""
+echo -e "  ${BOLD}This will:${RESET}"
+echo -e "  ${DIM}  1. Snapshot current config to ${SNAPSHOT_DIR}/${RESET}"
+echo -e "  ${DIM}  2. Back up the database to ${SNAPSHOT_DIR}/db-backup-${CURRENT_VERSION}.sql${RESET}"
+echo -e "  ${DIM}  3. Pull new images (${TARGET_VERSION})${RESET}"
+echo -e "  ${DIM}  4. Restart the stack on new images${RESET}"
+echo -e "  ${DIM}  5. Verify all services are healthy${RESET}"
+echo -e "  ${DIM}  6. Auto-rollback to ${CURRENT_VERSION} if health checks fail${RESET}"
+echo ""
+read -rp "$(echo -e "  ${BOLD}Type 'yes' to proceed with the upgrade: ${RESET}")" _confirm
+[[ "${_confirm}" == "yes" ]] || { info "Upgrade aborted. No changes made."; exit 0; }
+
+step "── Step 4/7: Snapshot current state"
+
+mkdir -p "${SNAPSHOT_DIR}"
+cp "${COMPOSE_FILE}" "${SNAPSHOT_DIR}/docker-compose.yml.${CURRENT_VERSION}"
+cp "${ENV_FILE}"     "${SNAPSHOT_DIR}/.env.${CURRENT_VERSION}"
+chmod 600 "${SNAPSHOT_DIR}/.env.${CURRENT_VERSION}"
+success "Config snapshot saved to ${SNAPSHOT_DIR}/"
+
+info "Backing up database (pg_dump)..."
+DB_BACKUP="${SNAPSHOT_DIR}/db-backup-${CURRENT_VERSION}.sql"
+if docker exec gosecureshare-postgres pg_dump \
+    -U "${POSTGRES_USER}" "${POSTGRES_DB}" \
+    > "${DB_BACKUP}" 2>/dev/null; then
+  _bk_size=$(du -sh "${DB_BACKUP}" 2>/dev/null | cut -f1 || echo "?")
+  success "Database backed up: ${DB_BACKUP} (${_bk_size})"
+else
+  warn "pg_dump failed (postgres container may be down). Continuing without DB backup."
+  read -rp "$(echo -e "  ${BOLD}Continue anyway? (yes/no) [no]: ${RESET}")" _skip_backup
+  [[ "${_skip_backup:-no}" == "yes" ]] || { info "Upgrade aborted."; exit 0; }
+fi
+
+step "── Step 5/7: Pull new images (${TARGET_VERSION})"
+
+_pull_failed=false
 for img in "${IMAGES[@]}"; do
-  docker pull "${REGISTRY}/${NAMESPACE}/${img}:${TARGET_VERSION}" || error "Failed to pull ${img}:${TARGET_VERSION}"
+  info "  Pulling ${img}:${TARGET_VERSION}..."
+  if ! docker pull "${REGISTRY}/${NAMESPACE}/${img}:${TARGET_VERSION}"; then
+    warn "  Failed to pull ${img}:${TARGET_VERSION}"
+    _pull_failed=true
+    break
+  fi
+  success "  Pulled ${img}:${TARGET_VERSION}"
 done
+
+if [[ "${_pull_failed}" == "true" ]]; then
+  error "Image pull failed. The live stack has NOT been touched. Retry when the issue is resolved."
+fi
+success "All images pulled successfully."
+
+step "── Step 6/7: Apply upgrade"
+
 for img in "${IMAGES[@]}"; do
-  sed -i "s|${REGISTRY}/${NAMESPACE}/${img}:.*|${REGISTRY}/${NAMESPACE}/${img}:${TARGET_VERSION}|g" \
-    "${INSTALL_DIR}/docker-compose.yml"
+  sed -i "s|${REGISTRY}/${NAMESPACE}/${img}:[^ ]*|${REGISTRY}/${NAMESPACE}/${img}:${TARGET_VERSION}|g" \
+    "${COMPOSE_FILE}"
 done
+success "docker-compose.yml updated to ${TARGET_VERSION}."
+
 cd "${INSTALL_DIR}"
+info "Restarting stack with new images..."
 docker compose up -d
+success "Stack restarted."
+
+step "── Step 7/7: Health verification"
+
+HEALTH_TIMEOUT=120
+HEALTH_INTERVAL=5
+
+_wait_healthy() {
+  local container="$1" elapsed=0
+  info "  Waiting for ${container} to become healthy..."
+  while (( elapsed < HEALTH_TIMEOUT )); do
+    local _status
+    _status=$(docker inspect --format='{{.State.Health.Status}}' \
+              "${container}" 2>/dev/null || echo "missing")
+    if [[ "${_status}" == "healthy" ]]; then
+      success "  ${container} is healthy."
+      return 0
+    fi
+    if [[ "${_status}" == "unhealthy" ]]; then
+      warn "  ${container} reported unhealthy."
+      return 1
+    fi
+    sleep "${HEALTH_INTERVAL}"
+    (( elapsed += HEALTH_INTERVAL ))
+  done
+  warn "  ${container} did not become healthy within ${HEALTH_TIMEOUT}s."
+  return 1
+}
+
+_rollback() {
+  echo ""
+  echo -e "${BOLD}${RED}╔$(printf '═%.0s' {1..62})╗${RESET}"
+  echo -e "${BOLD}${RED}║  ✗  HEALTH CHECK FAILED — INITIATING ROLLBACK             ║${RESET}"
+  echo -e "${BOLD}${RED}╚$(printf '═%.0s' {1..62})╝${RESET}"
+  echo ""
+  if [[ -f "${SNAPSHOT_DIR}/docker-compose.yml.${CURRENT_VERSION}" ]]; then
+    cp "${SNAPSHOT_DIR}/docker-compose.yml.${CURRENT_VERSION}" "${COMPOSE_FILE}"
+    success "docker-compose.yml restored."
+  fi
+  if [[ -f "${SNAPSHOT_DIR}/.env.${CURRENT_VERSION}" ]]; then
+    cp "${SNAPSHOT_DIR}/.env.${CURRENT_VERSION}" "${ENV_FILE}"
+    chmod 600 "${ENV_FILE}"
+    success ".env restored."
+  fi
+  for img in "${IMAGES[@]}"; do
+    docker pull "${REGISTRY}/${NAMESPACE}/${img}:${CURRENT_VERSION}" 2>/dev/null || \
+      warn "  Could not re-pull ${img}:${CURRENT_VERSION} — using locally cached image."
+  done
+  cd "${INSTALL_DIR}"
+  docker compose up -d
+  echo ""
+  warn "Rollback complete. Stack is running on version ${CURRENT_VERSION}."
+  warn "DB backup: ${SNAPSHOT_DIR}/db-backup-${CURRENT_VERSION}.sql"
+  echo ""
+  exit 1
+}
+
+_health_failed=false
+for _svc in gosecureshare-api-platform gosecureshare-api-recipient \
+            gosecureshare-ui-platform  gosecureshare-ui-recipient; do
+  _wait_healthy "${_svc}" || { _health_failed=true; break; }
+done
+
+[[ "${_health_failed}" == "true" ]] && _rollback
+
 sed -i "s|^GSS_INSTALLED_VERSION=.*|GSS_INSTALLED_VERSION=${TARGET_VERSION}|" "${ENV_FILE}"
-success "Upgrade complete: ${CURRENT_VERSION} → ${TARGET_VERSION}"
+
+echo ""
+echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${GREEN}║  ✓  Upgrade complete!                                      ║${RESET}"
+echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+echo -e "  ${BOLD}Version:${RESET}  ${YELLOW}${CURRENT_VERSION}${RESET}  →  ${GREEN}${TARGET_VERSION}${RESET}"
+echo ""
+echo -e "  ${DIM}Snapshot kept at: ${SNAPSHOT_DIR}/${RESET}"
+echo -e "  ${DIM}Container status: cd ${INSTALL_DIR} && docker compose ps${RESET}"
+echo ""
 UPGRADEEOF
 chmod +x "${INSTALL_DIR}/upgrade.sh"
 success "upgrade.sh written."
+
+# -----------------------------------------------------------------------------
+# stop.sh
+# -----------------------------------------------------------------------------
+info "Writing ${INSTALL_DIR}/stop.sh ..."
+cat > "${INSTALL_DIR}/stop.sh" <<'STOPEOF'
+#!/usr/bin/env bash
+# =============================================================================
+# GoSecureShare — Graceful Stop Script
+#
+# Usage:  sudo ./stop.sh
+#
+# What it does:
+#   1. Pauses host Nginx (certfiles mode) so no new requests hit backends.
+#   2. Waits a configurable drain period for in-flight requests to finish.
+#   3. Stops app containers gracefully (SIGTERM), then stops postgres last.
+#   4. Prints final container status.
+#
+# Environment overrides:
+#   GSS_DRAIN_SECONDS=10   Seconds to wait for in-flight requests to drain.
+#                          Set to 0 to skip drain wait.
+# =============================================================================
+set -euo pipefail
+
+RED=$'\033[0;31m'   GREEN=$'\033[0;32m'  YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'  BOLD=$'\033[1m'      RESET=$'\033[0m'  DIM=$'\033[2m'
+
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
+
+[[ $EUID -ne 0 ]] && error "Please run as root: sudo ./stop.sh"
+
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${INSTALL_DIR}/.env"
+DRAIN_SECONDS="${GSS_DRAIN_SECONDS:-10}"
+
+[[ -f "${ENV_FILE}" ]]     || error ".env not found. Is GoSecureShare installed?"
+[[ -f "${INSTALL_DIR}/docker-compose.yml" ]] || error "docker-compose.yml not found."
+
+VERSION=$(grep '^GSS_INSTALLED_VERSION=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "?")
+
+echo ""
+echo -e "${BOLD}${YELLOW}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${YELLOW}║      GoSecureShare ${VERSION} — Graceful Stop                 ║${RESET}"
+echo -e "${BOLD}${YELLOW}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+
+_running=$(docker ps --format '{{.Names}}\t{{.Status}}' 2>/dev/null \
+           | grep '^gosecureshare-' || true)
+if [[ -z "${_running}" ]]; then
+  info "No GoSecureShare containers are currently running."
+  exit 0
+fi
+
+echo -e "  ${BOLD}Currently running:${RESET}"
+while IFS= read -r _line; do
+  echo -e "  ${DIM}  • ${_line}${RESET}"
+done <<< "${_running}"
+echo ""
+
+# ── Step 1: Pause host Nginx ─────────────────────────────────────────────────
+if systemctl is-active --quiet nginx 2>/dev/null; then
+  info "Pausing host Nginx to stop accepting new connections..."
+  systemctl stop nginx
+  success "Host Nginx stopped."
+  touch "${INSTALL_DIR}/.nginx-was-running"
+else
+  rm -f "${INSTALL_DIR}/.nginx-was-running"
+fi
+
+# ── Step 2: Drain wait ───────────────────────────────────────────────────────
+if (( DRAIN_SECONDS > 0 )); then
+  info "Waiting ${DRAIN_SECONDS}s for in-flight requests to drain..."
+  sleep "${DRAIN_SECONDS}"
+  success "Drain wait complete."
+fi
+
+# ── Step 3: Stop app containers first ────────────────────────────────────────
+info "Stopping application containers..."
+for _svc in gosecureshare-nginx-platform  gosecureshare-nginx-recipient \
+            gosecureshare-ui-platform     gosecureshare-ui-recipient \
+            gosecureshare-api-platform    gosecureshare-api-recipient; do
+  if docker ps -q -f name="${_svc}" | grep -q .; then
+    docker stop "${_svc}" &>/dev/null && \
+      success "  Stopped: ${_svc}" || \
+      warn    "  Could not stop: ${_svc} (may already be stopped)"
+  fi
+done
+
+# ── Step 4: Stop postgres last ───────────────────────────────────────────────
+if docker ps -q -f name="gosecureshare-postgres" | grep -q .; then
+  info "Stopping database (postgres)..."
+  docker stop gosecureshare-postgres &>/dev/null
+  success "  Stopped: gosecureshare-postgres"
+fi
+
+echo ""
+info "Container status:"
+cd "${INSTALL_DIR}"
+docker compose ps --format 'table {{.Name}}\t{{.Status}}' 2>/dev/null || true
+
+echo ""
+echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${GREEN}║  ✓  GoSecureShare stopped.                                 ║${RESET}"
+echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+echo -e "  ${DIM}To start again:  sudo ${INSTALL_DIR}/start.sh${RESET}"
+echo ""
+STOPEOF
+chmod +x "${INSTALL_DIR}/stop.sh"
+success "stop.sh written."
+
+# -----------------------------------------------------------------------------
+# start.sh
+# -----------------------------------------------------------------------------
+info "Writing ${INSTALL_DIR}/start.sh ..."
+cat > "${INSTALL_DIR}/start.sh" <<'STARTEOF'
+#!/usr/bin/env bash
+# =============================================================================
+# GoSecureShare — Start Script (post-maintenance / manual start)
+#
+# Usage:  sudo ./start.sh
+#
+# What it does:
+#   1. Pre-flight: Docker daemon, compose file, .env.
+#   2. Starts the full stack via docker compose up -d.
+#   3. Resumes host Nginx if it was stopped by stop.sh.
+#   4. Health-polls all 4 app containers.
+#   5. Prints access URLs on success.
+# =============================================================================
+set -euo pipefail
+
+RED=$'\033[0;31m'   GREEN=$'\033[0;32m'  YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'  BOLD=$'\033[1m'      RESET=$'\033[0m'  DIM=$'\033[2m'
+
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
+
+[[ $EUID -ne 0 ]] && error "Please run as root: sudo ./start.sh"
+
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${INSTALL_DIR}/.env"
+
+VERSION=$(grep '^GSS_INSTALLED_VERSION=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "?")
+PLATFORM_DOMAIN=$(grep '^PLATFORM_DOMAIN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
+RECIPIENT_DOMAIN=$(grep '^RECIPIENT_DOMAIN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
+PLATFORM_HTTP_PORT=$(grep '^PLATFORM_HTTP_PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
+RECIPIENT_HTTP_PORT=$(grep '^RECIPIENT_HTTP_PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
+
+echo ""
+echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${GREEN}║      GoSecureShare ${VERSION} — Starting Stack               ║${RESET}"
+echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+
+info "Running pre-flight checks..."
+
+[[ -f "${ENV_FILE}" ]] \
+  || error ".env not found at ${INSTALL_DIR}. Re-run install.sh to reinstall."
+
+[[ -f "${INSTALL_DIR}/docker-compose.yml" ]] \
+  || error "docker-compose.yml not found at ${INSTALL_DIR}."
+
+docker info &>/dev/null \
+  || error "Docker daemon is not running. Start it with: systemctl start docker"
+
+success "Pre-flight checks passed."
+
+info "Starting GoSecureShare stack..."
+cd "${INSTALL_DIR}"
+docker compose up -d
+success "Stack started."
+
+if [[ -f "${INSTALL_DIR}/.nginx-was-running" ]]; then
+  info "Resuming host Nginx..."
+  if nginx -t &>/dev/null; then
+    systemctl start nginx
+    success "Host Nginx resumed."
+  else
+    warn "Nginx config test failed — Nginx NOT started. Check /etc/nginx/sites-available/."
+    warn "Fix the config then run: systemctl start nginx"
+  fi
+  rm -f "${INSTALL_DIR}/.nginx-was-running"
+elif systemctl list-unit-files nginx.service &>/dev/null 2>&1 \
+     && ! systemctl is-active --quiet nginx 2>/dev/null; then
+  warn "Host Nginx is installed but not running."
+  warn "If you use certfiles SSL mode, start it: systemctl start nginx"
+fi
+
+info "Waiting for services to become healthy..."
+
+HEALTH_TIMEOUT=120
+HEALTH_INTERVAL=5
+
+_wait_healthy() {
+  local container="$1" elapsed=0
+  while (( elapsed < HEALTH_TIMEOUT )); do
+    local _status
+    _status=$(docker inspect --format='{{.State.Health.Status}}' \
+              "${container}" 2>/dev/null || echo "missing")
+    [[ "${_status}" == "healthy" ]]   && { success "  ${container} — healthy"; return 0; }
+    [[ "${_status}" == "unhealthy" ]] && { warn   "  ${container} — unhealthy"; return 1; }
+    sleep "${HEALTH_INTERVAL}"
+    (( elapsed += HEALTH_INTERVAL ))
+  done
+  warn "  ${container} — did not become healthy within ${HEALTH_TIMEOUT}s"
+  return 1
+}
+
+_health_failed=false
+for _svc in gosecureshare-api-platform gosecureshare-api-recipient \
+            gosecureshare-ui-platform  gosecureshare-ui-recipient; do
+  _wait_healthy "${_svc}" || _health_failed=true
+done
+
+if [[ "${_health_failed}" == "true" ]]; then
+  echo ""
+  warn "One or more services did not become healthy."
+  warn "Check logs: cd ${INSTALL_DIR} && docker compose logs -f"
+  echo ""
+  exit 1
+fi
+
+echo ""
+echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${GREEN}║  ✓  GoSecureShare is up and healthy.                       ║${RESET}"
+echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+
+if systemctl is-active --quiet nginx 2>/dev/null && [[ -n "${PLATFORM_DOMAIN}" ]]; then
+  echo -e "  ${CYAN}Platform:   ${RESET}https://${PLATFORM_DOMAIN}"
+  echo -e "  ${CYAN}Recipient:  ${RESET}https://${RECIPIENT_DOMAIN}"
+elif [[ -n "${PLATFORM_HTTP_PORT}" ]]; then
+  _SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<server-ip>")
+  echo -e "  ${CYAN}Platform:   ${RESET}http://${_SERVER_IP}:${PLATFORM_HTTP_PORT}"
+  echo -e "  ${CYAN}Recipient:  ${RESET}http://${_SERVER_IP}:${RECIPIENT_HTTP_PORT}"
+fi
+
+echo ""
+echo -e "  ${DIM}Logs:   cd ${INSTALL_DIR} && docker compose logs -f${RESET}"
+echo -e "  ${DIM}Stop:   sudo ${INSTALL_DIR}/stop.sh${RESET}"
+echo ""
+STARTEOF
+chmod +x "${INSTALL_DIR}/start.sh"
+success "start.sh written."
+
+# -----------------------------------------------------------------------------
+# backup.sh
+# -----------------------------------------------------------------------------
+info "Writing ${INSTALL_DIR}/backup.sh ..."
+cat > "${INSTALL_DIR}/backup.sh" <<'BACKUPEOF'
+#!/usr/bin/env bash
+# =============================================================================
+# GoSecureShare — Backup Script
+#
+# Usage:
+#   sudo ./backup.sh              → full backup, default retention (7 copies)
+#   sudo ./backup.sh --no-compress → skip gzip (faster, larger)
+#   GSS_BACKUP_KEEP=14 sudo ./backup.sh → keep 14 most recent backups
+#   GSS_BACKUP_DIR=/mnt/nas sudo ./backup.sh → write to custom path
+#
+# What is backed up:
+#   1. Database        — pg_dump (plain SQL, gzip compressed)
+#   2. Configuration   — .env (chmod 600 in archive)
+#   3. Runtime config  — docker-compose.yml
+#   4. Nginx configs   — nginx/platform.conf, nginx/recipient.conf
+#   5. DB bootstrap    — db/docker-migrate.sh, db/init.sql
+#   6. Runtime scripts — upgrade.sh, start.sh, stop.sh, backup.sh
+#
+# Output:
+#   /opt/gosecureshare/backups/gss-backup-<version>-<timestamp>.tar.gz
+#   Permissions: 600 (root-only readable)
+#
+# Retention:
+#   Keeps the N most recent backup archives (default: 7).
+#   Override with GSS_BACKUP_KEEP env var.
+# =============================================================================
+set -euo pipefail
+
+RED=$'\033[0;31m'   GREEN=$'\033[0;32m'  YELLOW=$'\033[1;33m'
+CYAN=$'\033[0;36m'  BOLD=$'\033[1m'      RESET=$'\033[0m'  DIM=$'\033[2m'
+
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; exit 1; }
+step()    { echo -e "\n${BOLD}$*${RESET}"; }
+
+[[ $EUID -ne 0 ]] && error "Please run as root: sudo ./backup.sh"
+
+INSTALL_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ENV_FILE="${INSTALL_DIR}/.env"
+BACKUP_ROOT="${GSS_BACKUP_DIR:-${INSTALL_DIR}/backups}"
+BACKUP_KEEP="${GSS_BACKUP_KEEP:-7}"
+COMPRESS=true
+[[ "${1:-}" == "--no-compress" ]] && COMPRESS=false
+
+[[ -f "${ENV_FILE}" ]] || error ".env not found. Is GoSecureShare installed at ${INSTALL_DIR}?"
+
+VERSION=$(grep '^GSS_INSTALLED_VERSION=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "unknown")
+POSTGRES_USER=$(grep '^POSTGRES_USER=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "gss_superuser")
+POSTGRES_DB=$(grep '^POSTGRES_DB=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "gosecureshare")
+
+TIMESTAMP=$(date -u +"%Y%m%dT%H%M%SZ")
+BACKUP_NAME="gss-backup-${VERSION}-${TIMESTAMP}"
+STAGING_DIR="${BACKUP_ROOT}/.staging-${TIMESTAMP}"
+
+echo ""
+echo -e "${BOLD}${CYAN}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${CYAN}║      GoSecureShare ${VERSION} — Backup                        ║${RESET}"
+echo -e "${BOLD}${CYAN}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+echo -e "  ${DIM}Timestamp : ${TIMESTAMP}${RESET}"
+echo -e "  ${DIM}Output    : ${BACKUP_ROOT}/${RESET}"
+echo -e "  ${DIM}Retention : keep last ${BACKUP_KEEP} backups${RESET}"
+echo ""
+
+# =============================================================================
+# Prepare staging dir
+# =============================================================================
+step "── Step 1/5: Prepare staging area"
+mkdir -p "${STAGING_DIR}"
+chmod 700 "${STAGING_DIR}"
+success "Staging dir: ${STAGING_DIR}"
+
+# =============================================================================
+# Database backup
+# =============================================================================
+step "── Step 2/5: Database backup (pg_dump)"
+
+DB_DUMP="${STAGING_DIR}/database.sql"
+DB_DUMP_GZ="${DB_DUMP}.gz"
+
+if docker ps -q -f name="gosecureshare-postgres" | grep -q .; then
+  info "Running pg_dump on live database..."
+  if docker exec gosecureshare-postgres pg_dump \
+      -U "${POSTGRES_USER}" "${POSTGRES_DB}" \
+      > "${DB_DUMP}" 2>/dev/null; then
+    if [[ "${COMPRESS}" == "true" ]]; then
+      gzip -9 "${DB_DUMP}"
+      _dbsize=$(du -sh "${DB_DUMP_GZ}" 2>/dev/null | cut -f1 || echo "?")
+      success "Database dump: database.sql.gz (${_dbsize})"
+    else
+      _dbsize=$(du -sh "${DB_DUMP}" 2>/dev/null | cut -f1 || echo "?")
+      success "Database dump: database.sql (${_dbsize})"
+    fi
+  else
+    warn "pg_dump failed — skipping database backup."
+    echo "pg_dump failed at ${TIMESTAMP}" > "${STAGING_DIR}/database.FAILED"
+  fi
+else
+  warn "Postgres container is not running — skipping live database backup."
+  warn "You can restore from the latest backup or restart the stack and retry."
+  echo "postgres not running at ${TIMESTAMP}" > "${STAGING_DIR}/database.SKIPPED"
+fi
+
+# =============================================================================
+# Config + runtime files
+# =============================================================================
+step "── Step 3/5: Config and runtime files"
+
+_copy() {
+  local src="$1" dst_rel="$2"
+  local dst="${STAGING_DIR}/${dst_rel}"
+  mkdir -p "$(dirname "${dst}")"
+  if [[ -f "${src}" ]]; then
+    cp "${src}" "${dst}"
+    success "  Copied: ${dst_rel}"
+  else
+    warn "  Not found (skipped): ${src}"
+  fi
+}
+
+# .env — preserve restrictive permissions inside archive
+_copy "${INSTALL_DIR}/.env"                        "config/.env"
+chmod 600 "${STAGING_DIR}/config/.env"
+
+_copy "${INSTALL_DIR}/docker-compose.yml"          "config/docker-compose.yml"
+_copy "${INSTALL_DIR}/nginx/platform.conf"         "config/nginx/platform.conf"
+_copy "${INSTALL_DIR}/nginx/recipient.conf"        "config/nginx/recipient.conf"
+_copy "${INSTALL_DIR}/db/docker-migrate.sh"        "db/docker-migrate.sh"
+_copy "${INSTALL_DIR}/db/init.sql"                 "db/init.sql"
+_copy "${INSTALL_DIR}/upgrade.sh"                  "scripts/upgrade.sh"
+_copy "${INSTALL_DIR}/start.sh"                    "scripts/start.sh"
+_copy "${INSTALL_DIR}/stop.sh"                     "scripts/stop.sh"
+_copy "${INSTALL_DIR}/backup.sh"                   "scripts/backup.sh"
+
+# =============================================================================
+# Manifest
+# =============================================================================
+step "── Step 4/5: Write manifest"
+
+MANIFEST="${STAGING_DIR}/MANIFEST.txt"
+cat > "${MANIFEST}" <<MEOF
+GoSecureShare Backup Manifest
+==============================
+Version   : ${VERSION}
+Timestamp : ${TIMESTAMP}
+Hostname  : $(hostname -f 2>/dev/null || hostname)
+Created by: backup.sh
+
+Contents:
+$(find "${STAGING_DIR}" -type f | sort | sed "s|${STAGING_DIR}/||")
+MEOF
+success "Manifest written."
+
+# =============================================================================
+# Archive + secure permissions
+# =============================================================================
+step "── Step 5/5: Create archive"
+
+mkdir -p "${BACKUP_ROOT}"
+
+if [[ "${COMPRESS}" == "true" ]]; then
+  ARCHIVE="${BACKUP_ROOT}/${BACKUP_NAME}.tar.gz"
+  tar -czf "${ARCHIVE}" -C "${BACKUP_ROOT}" ".staging-${TIMESTAMP}"
+else
+  ARCHIVE="${BACKUP_ROOT}/${BACKUP_NAME}.tar"
+  tar -cf "${ARCHIVE}" -C "${BACKUP_ROOT}" ".staging-${TIMESTAMP}"
+fi
+
+chmod 600 "${ARCHIVE}"
+rm -rf "${STAGING_DIR}"
+
+_archive_size=$(du -sh "${ARCHIVE}" 2>/dev/null | cut -f1 || echo "?")
+success "Archive: ${ARCHIVE} (${_archive_size})"
+
+# =============================================================================
+# Retention — prune old backups
+# =============================================================================
+info "Applying retention policy (keep last ${BACKUP_KEEP})..."
+_archives=()
+while IFS= read -r -d '' _f; do
+  _archives+=("${_f}")
+done < <(find "${BACKUP_ROOT}" -maxdepth 1 -name 'gss-backup-*.tar*' -print0 \
+         | sort -z)
+
+_total=${#_archives[@]}
+if (( _total > BACKUP_KEEP )); then
+  _to_delete=$(( _total - BACKUP_KEEP ))
+  for (( i=0; i<_to_delete; i++ )); do
+    rm -f "${_archives[$i]}"
+    warn "  Pruned old backup: $(basename "${_archives[$i]}")"
+  done
+  success "Retention: kept ${BACKUP_KEEP} of ${_total} backups."
+else
+  success "Retention: ${_total} backup(s) present, no pruning needed."
+fi
+
+# =============================================================================
+# Summary
+# =============================================================================
+echo ""
+echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..62})╗${RESET}"
+echo -e "${BOLD}${GREEN}║  ✓  Backup complete!                                       ║${RESET}"
+echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..62})╝${RESET}"
+echo ""
+echo -e "  ${BOLD}Archive :${RESET} ${ARCHIVE}"
+echo -e "  ${BOLD}Size    :${RESET} ${_archive_size}"
+echo -e "  ${BOLD}Version :${RESET} ${VERSION}"
+echo ""
+echo -e "  ${DIM}To restore DB from this backup:${RESET}"
+echo -e "  ${CYAN}  tar -xzf $(basename "${ARCHIVE}") --strip-components=1 '*/database.sql.gz'${RESET}"
+echo -e "  ${CYAN}  gunzip database.sql.gz${RESET}"
+echo -e "  ${CYAN}  docker exec -i gosecureshare-postgres psql -U ${POSTGRES_USER} ${POSTGRES_DB} < database.sql${RESET}"
+echo ""
+echo -e "  ${DIM}Automate with cron (daily at 02:00):${RESET}"
+echo -e "  ${CYAN}  0 2 * * * root ${INSTALL_DIR}/backup.sh >> /var/log/gss-backup.log 2>&1${RESET}"
+echo ""
+BACKUPEOF
+chmod +x "${INSTALL_DIR}/backup.sh"
+success "backup.sh written."
