@@ -9,7 +9,7 @@
 # Mode 2: Provide certificate files (corporate CA or purchased cert)
 #         → Input mode (file path or paste) is asked ONCE per service.
 #         → Recipient can reuse platform certs (wildcard / SAN).
-#         → Validates cert+key pair match.
+#         → Validates cert+key pair match BEFORE fullchain build and Nginx start.
 #         → Installs host Nginx as TLS terminator.
 #         → Recipient  → port 443  (standard HTTPS, clean share links)
 #         → Platform   → port 8443 (non-standard, internal use; user-prompted)
@@ -124,6 +124,53 @@ _ask_input_mode() {
   done
 }
 
+# =============================================================================
+# _validate_cert_key_pair <service_label> <cert_dir>
+#
+# Validates that cert.pem and key.pem moduli match using openssl.
+# Cleans up the saved files and errors out if they do not match.
+# Must be called BEFORE fullchain.pem is built and BEFORE Nginx is touched.
+# =============================================================================
+_validate_cert_key_pair() {
+  local label="$1" cert_dir="$2"
+  info "  Validating ${label} certificate / key pair..."
+
+  local cert_md5 key_md5
+  cert_md5=$(openssl x509 -noout -modulus -in "${cert_dir}/cert.pem" 2>/dev/null | md5sum) \
+    || { rm -f "${cert_dir}/cert.pem" "${cert_dir}/key.pem" "${cert_dir}/ca-bundle.pem"
+         error "${label} certificate is not a valid X.509 PEM file. Removed saved files."; }
+
+  key_md5=$(openssl rsa -noout -modulus -in "${cert_dir}/key.pem" 2>/dev/null | md5sum) \
+    || { rm -f "${cert_dir}/cert.pem" "${cert_dir}/key.pem" "${cert_dir}/ca-bundle.pem"
+         error "${label} private key is not a valid RSA PEM file. Removed saved files."; }
+
+  if [[ "${cert_md5}" != "${key_md5}" ]]; then
+    rm -f "${cert_dir}/cert.pem" "${cert_dir}/key.pem" "${cert_dir}/ca-bundle.pem"
+    error "${label} certificate and key do NOT match — they were removed.\n        Re-run install.sh and provide the correct matching cert and key."
+  fi
+
+  # Also verify the cert is not expired
+  local not_after
+  not_after=$(openssl x509 -noout -enddate -in "${cert_dir}/cert.pem" 2>/dev/null | cut -d= -f2 || echo "")
+  if [[ -n "${not_after}" ]]; then
+    local expiry_epoch now_epoch
+    expiry_epoch=$(date -d "${not_after}" +%s 2>/dev/null || date -j -f "%b %d %T %Y %Z" "${not_after}" +%s 2>/dev/null || echo "0")
+    now_epoch=$(date +%s)
+    if (( expiry_epoch > 0 && expiry_epoch < now_epoch )); then
+      warn "  ${label} certificate expired on: ${not_after}"
+      warn "  The installation will continue but the browser will show a certificate error."
+      warn "  Replace the certificate using: sudo ./update-ssl.sh"
+    elif (( expiry_epoch > 0 && (expiry_epoch - now_epoch) < 2592000 )); then
+      warn "  ${label} certificate expires soon: ${not_after} (within 30 days)"
+      warn "  Plan a renewal using: sudo ./update-ssl.sh"
+    else
+      [[ -n "${not_after}" ]] && info "  ${label} certificate valid until: ${not_after}"
+    fi
+  fi
+
+  success "  ${label} cert/key pair validated ✓"
+}
+
 if [[ "${_ssl_choice}" == "yes" ]]; then
   ENABLE_SSL=true
 
@@ -201,7 +248,11 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     SSL_CERT_DIR="${INSTALL_DIR}/ssl"
     mkdir -p "${SSL_CERT_DIR}/platform" "${SSL_CERT_DIR}/recipient"
 
-    # -- Platform certificates --
+    # -------------------------------------------------------------------------
+    # Platform certificates
+    # Collect all 3 files → validate cert+key match → THEN build fullchain.
+    # Nginx is not touched until both services pass validation.
+    # -------------------------------------------------------------------------
     echo ""
     echo -e "  ${BOLD}── Platform certificates (${PLATFORM_DOMAIN}) ──────────────────────────────${RESET}"
     echo -e "  ${DIM}  Three files needed: certificate, private key, CA/intermediate bundle.${RESET}"
@@ -213,13 +264,19 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
     _prompt_cert_file "Platform private key (.key / .pem)"       "${SSL_CERT_DIR}/platform/key.pem"       "${_p_mode}"
     _prompt_cert_file "Platform CA / intermediate bundle (.pem)"  "${SSL_CERT_DIR}/platform/ca-bundle.pem" "${_p_mode}"
 
+    # FIX: validate BEFORE building fullchain and BEFORE touching Nginx
+    _validate_cert_key_pair "Platform" "${SSL_CERT_DIR}/platform"
+
     cat "${SSL_CERT_DIR}/platform/cert.pem" \
         "${SSL_CERT_DIR}/platform/ca-bundle.pem" \
         > "${SSL_CERT_DIR}/platform/fullchain.pem"
     chmod 600 "${SSL_CERT_DIR}/platform/key.pem"
-    success "  Platform certificates saved."
+    success "  Platform certificates saved and fullchain built."
 
-    # -- Recipient certificates --
+    # -------------------------------------------------------------------------
+    # Recipient certificates
+    # Same pattern: collect → validate → build fullchain.
+    # -------------------------------------------------------------------------
     echo ""
     echo -e "  ${BOLD}── Recipient certificates (${RECIPIENT_DOMAIN}) ─────────────────────────────${RESET}"
     echo ""
@@ -230,7 +287,10 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
       cp "${SSL_CERT_DIR}/platform/cert.pem"      "${SSL_CERT_DIR}/recipient/cert.pem"
       cp "${SSL_CERT_DIR}/platform/key.pem"       "${SSL_CERT_DIR}/recipient/key.pem"
       cp "${SSL_CERT_DIR}/platform/ca-bundle.pem" "${SSL_CERT_DIR}/recipient/ca-bundle.pem"
+      cp "${SSL_CERT_DIR}/platform/fullchain.pem" "${SSL_CERT_DIR}/recipient/fullchain.pem"
+      chmod 600 "${SSL_CERT_DIR}/recipient/key.pem"
       success "  Reusing Platform certificate files for Recipient."
+      # No need to re-validate — same files, already validated above.
     else
       echo -e "  ${DIM}  Provide separate certificate files for ${RECIPIENT_DOMAIN}.${RESET}"
       _ask_input_mode "Recipient"
@@ -239,30 +299,23 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
       _prompt_cert_file "Recipient certificate (.crt / .pem)"       "${SSL_CERT_DIR}/recipient/cert.pem"      "${_r_mode}"
       _prompt_cert_file "Recipient private key (.key / .pem)"       "${SSL_CERT_DIR}/recipient/key.pem"       "${_r_mode}"
       _prompt_cert_file "Recipient CA / intermediate bundle (.pem)"  "${SSL_CERT_DIR}/recipient/ca-bundle.pem" "${_r_mode}"
-    fi
 
-    cat "${SSL_CERT_DIR}/recipient/cert.pem" \
-        "${SSL_CERT_DIR}/recipient/ca-bundle.pem" \
-        > "${SSL_CERT_DIR}/recipient/fullchain.pem"
-    chmod 600 "${SSL_CERT_DIR}/recipient/key.pem"
-    success "  Recipient certificates saved."
+      # FIX: validate BEFORE building fullchain and BEFORE touching Nginx
+      _validate_cert_key_pair "Recipient" "${SSL_CERT_DIR}/recipient"
+
+      cat "${SSL_CERT_DIR}/recipient/cert.pem" \
+          "${SSL_CERT_DIR}/recipient/ca-bundle.pem" \
+          > "${SSL_CERT_DIR}/recipient/fullchain.pem"
+      chmod 600 "${SSL_CERT_DIR}/recipient/key.pem"
+      success "  Recipient certificates saved and fullchain built."
+    fi
 
     PLATFORM_CERT_DIR="${SSL_CERT_DIR}/platform"
     RECIPIENT_CERT_DIR="${SSL_CERT_DIR}/recipient"
 
-    # Validate cert + key pairs match
-    info "Validating certificate / key pairs..."
-    P_CERT_MD5=$(openssl x509 -noout -modulus -in "${PLATFORM_CERT_DIR}/cert.pem" 2>/dev/null | md5sum)
-    P_KEY_MD5=$( openssl rsa  -noout -modulus -in "${PLATFORM_CERT_DIR}/key.pem"  2>/dev/null | md5sum)
-    [[ "${P_CERT_MD5}" != "${P_KEY_MD5}" ]] && \
-      error "Platform certificate and key do NOT match. Check your files."
-    success "  Platform cert/key pair validated."
-
-    R_CERT_MD5=$(openssl x509 -noout -modulus -in "${RECIPIENT_CERT_DIR}/cert.pem" 2>/dev/null | md5sum)
-    R_KEY_MD5=$( openssl rsa  -noout -modulus -in "${RECIPIENT_CERT_DIR}/key.pem"  2>/dev/null | md5sum)
-    [[ "${R_CERT_MD5}" != "${R_KEY_MD5}" ]] && \
-      error "Recipient certificate and key do NOT match. Check your files."
-    success "  Recipient cert/key pair validated."
+    # -------------------------------------------------------------------------
+    # All certs validated. Now safe to install and configure Nginx.
+    # -------------------------------------------------------------------------
 
     # Install host Nginx
     info "Installing host Nginx..."
