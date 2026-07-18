@@ -25,8 +25,7 @@
 3. [Quick Install](#quick-install)
 4. [Pin to a Specific Version](#pin-to-a-specific-version)
 5. [SSL & Reverse Proxy](#ssl--reverse-proxy)
-6. [GHCR Credentials](#ghcr-credentials)
-7. [Administration](#administration)
+6. [Administration](#administration)
    - [Directory Layout](#administration-directory-layout)
    - [Upgrade](#upgrading----upgradesh)
    - [Stop for Maintenance](#stopping-for-maintenance----stopsh)
@@ -51,9 +50,6 @@ kisa-ops/GoSecureShare
 └── install.sh    ← The only file you need to download
 ```
 
-> The installer downloads its own `lib/` modules and `db/` files directly from GitHub
-> during setup, using the GitHub PAT you provide at the start of the interactive wizard.
-
 ---
 
 ## Prerequisites
@@ -68,9 +64,6 @@ kisa-ops/GoSecureShare
 > **PostgreSQL is not required on the host.** It runs as a dedicated container inside
 > the Docker stack.
 
-> ⚠️ All `docker` commands require `sudo` unless your user has been added to the `docker`
-> group (`sudo usermod -aG docker $USER`).
-
 ---
 
 ## Quick Install
@@ -83,9 +76,6 @@ curl -fsSL https://raw.githubusercontent.com/kisa-ops/GoSecureShare/main/install
 chmod +x install.sh
 ```
 
-> If the repository is **private**, add `-H "Authorization: Bearer <your-token>"` to the
-> `curl` command above, or transfer the file to the server via SFTP.
-
 ### 2 &mdash; Run the installer
 
 ```bash
@@ -94,8 +84,7 @@ sudo ./install.sh
 
 The interactive wizard guides you through every step:
 
-1. ✅ **GHCR credentials** &mdash; prompted first; your GitHub PAT (`read:packages` scope)
-   is used to pull images and to bootstrap the `lib/` modules from GitHub
+1. ✅ **GHCR credentials** &mdash; prompt for GitHub PAT (speak to contact.us@gosecureshare.com)
 2. ✅ **Prerequisites** &mdash; Docker, Compose, `curl`, and `openssl` are verified
 3. 🔍 **Version** &mdash; latest stable release auto-detected from GitHub Releases
    (override: `GSS_VERSION=x.y.z sudo ./install.sh`)
@@ -116,10 +105,10 @@ The interactive wizard guides you through every step:
 
 After installation, the summary screen displays your URLs:
 
-| Interface                    | Default internal port | Purpose                                             |
-|------------------------------|-----------------------|-----------------------------------------------------|
-| **Platform** (Admin / Staff) | `8181`                | Login &middot; create secrets &middot; admin dashboard |
-| **Recipient Portal**         | `80`                  | View a shared one-time secret link                  |
+| Interface                    | Internal host port | Purpose                                             |
+|------------------------------|--------------------|-----------------------------------------------------|
+| **Platform** (Admin / Staff) | `8181`             | Login &middot; create secrets &middot; admin dashboard |
+| **Recipient Portal**         | `80`               | View a shared one-time secret link                  |
 
 > These internal ports sit **behind your reverse proxy or host Nginx**, which terminates
 > TLS and forwards to them. See [SSL & Reverse Proxy](#ssl--reverse-proxy) below.
@@ -153,10 +142,14 @@ Choose this if you already have Cloudflare, Nginx, HAProxy, or any other TLS-ter
 proxy in front of the server. Docker binds its ports to `127.0.0.1` only; your proxy
 handles HTTPS and forwards traffic:
 
-| Proxy target                 | Internal address         |
-|------------------------------|--------------------------|
-| Platform (admin / staff UI)  | `http://127.0.0.1:8181`  |
-| Recipient (share portal)     | `http://127.0.0.1:80`    |
+| Proxy target                 | Internal upstream        | External port |
+|------------------------------|--------------------------|---------------|
+| Platform (admin / staff UI)  | `http://127.0.0.1:8181`  | `8443` (HTTPS) |
+| Recipient (share portal)     | `http://127.0.0.1:8282`  | `443` (HTTPS)  |
+
+> **Port mapping summary:** the proxy listens on the external port, terminates TLS, and
+> forwards plain HTTP to the internal upstream. End users always access the platform on
+> `https://platform.anoudapps.com:8443` and the recipient portal on `https://share.anoudapps.com`.
 
 ### Option B &mdash; Provide certificate files
 
@@ -167,37 +160,10 @@ PEM content &mdash; separately for the Platform and Recipient endpoints.
 
 ---
 
-## GHCR Credentials
-
-GoSecureShare images are hosted on GitHub Container Registry (GHCR). A GitHub Personal
-Access Token (PAT) is **required** and is collected interactively at the start of the
-installer. There is no way to skip this step.
-
-### Required PAT scopes
-
-| Scope           | Required for                                                            |
-|-----------------|-------------------------------------------------------------------------|
-| `read:packages` | Pulling container images from `ghcr.io/kisa-ops`                       |
-| `repo`          | Fetching `lib/` and `db/` files when the source repository is private  |
-
-> If images are public but the source repo is private, include both scopes.
-> If only images are private, `read:packages` alone is sufficient.
-
-### Generate a PAT
-
-Go to **GitHub &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens
-(classic)** and create a token with the scopes above. Paste it when prompted by the
-installer.
-
----
-
 ## Administration
 
 All day-to-day administration is performed using the management scripts installed at
 `/opt/gosecureshare/`. Always run them as `root` from that directory.
-
-> ⚠️ **Golden rule:** Never use `git pull` on a production server. All changes are
-> applied through `install.sh` (fresh install) or `upgrade.sh` (existing install).
 
 ### Administration Directory Layout
 
@@ -251,8 +217,7 @@ sudo ./upgrade.sh
 sudo ./upgrade.sh 2.5.0
 ```
 
-> The installer prompts for your GitHub PAT during the upgrade if GHCR credentials are
-> needed to pull the new images.
+> The installer prompts for GitHub PAT (speak with contact.us@gosecureshare.com).
 
 #### Preserved files after a successful upgrade
 
@@ -425,20 +390,21 @@ docker exec -i gosecureshare-postgres psql \
 
 ### Quick Reference
 
-| Task                        | Command                                                  |
-|-----------------------------|----------------------------------------------------------|
-| **Upgrade to latest**       | `cd /opt/gosecureshare && sudo ./upgrade.sh`             |
-| **Upgrade to version**      | `sudo ./upgrade.sh 2.5.0`                                |
-| **Stop for maintenance**    | `sudo ./stop.sh`                                         |
-| **Start after maintenance** | `sudo ./start.sh`                                        |
-| **Take a manual backup**    | `sudo ./backup.sh`                                       |
-| **Check container status**  | `sudo docker compose ps`                                 |
-| **Tail all logs**           | `sudo docker compose logs -f`                            |
-| **Tail one service**        | `sudo docker compose logs -f api_platform`               |
-| **View DB migration log**   | `sudo docker logs gosecureshare-db-migrate`              |
-| **Health check (recipient)**| `curl http://localhost:80/healthz`                       |
-| **Restart single container**| `sudo docker compose restart api_platform`               |
-| **Open DB shell**           | `sudo docker exec -it gosecureshare-postgres psql -U gss_superuser gosecureshare` |
+| Task                              | Command                                                                            |
+|-----------------------------------|------------------------------------------------------------------------------------|
+| **Upgrade to latest**             | `cd /opt/gosecureshare && sudo ./upgrade.sh`                                       |
+| **Upgrade to version**            | `sudo ./upgrade.sh 2.5.0`                                                          |
+| **Stop for maintenance**          | `sudo ./stop.sh`                                                                   |
+| **Start after maintenance**       | `sudo ./start.sh`                                                                  |
+| **Take a manual backup**          | `sudo ./backup.sh`                                                                 |
+| **Check container status**        | `sudo docker compose ps`                                                           |
+| **Tail all logs**                 | `sudo docker compose logs -f`                                                      |
+| **Tail one service**              | `sudo docker compose logs -f api_platform`                                         |
+| **View DB migration log**         | `sudo docker logs gosecureshare-db-migrate`                                        |
+| **Health check — Platform**       | `curl http://localhost:8181/healthz`                                               |
+| **Health check — Recipient**      | `curl http://localhost:8282/healthz`                                               |
+| **Restart single container**      | `sudo docker compose restart api_platform`                                         |
+| **Open DB shell**                 | `sudo docker exec -it gosecureshare-postgres psql -U gss_superuser gosecureshare` |
 
 ---
 
@@ -487,10 +453,10 @@ cd ~/gosecureshare && sudo ./install.sh
 
 ```bash
 cd /opt/gosecureshare
-sudo docker compose ps                       # all containers healthy / running
-sudo docker logs gosecureshare-db-migrate    # should end with exit code 0
-curl http://localhost:80/healthz             # → {"ok": true}
-curl http://localhost:8181/healthz           # → {"ok": true}
+sudo docker compose ps                        # all containers healthy / running
+sudo docker logs gosecureshare-db-migrate     # should end with exit code 0
+curl http://localhost:8181/healthz            # → {"ok": true}  (Platform)
+curl http://localhost:8282/healthz            # → {"ok": true}  (Recipient)
 ```
 
 ---
@@ -504,7 +470,7 @@ Host machine
         ├── gosecureshare-postgres          :5434 (host) / :5432 (internal)
         ├── gosecureshare-db-migrate        runs once, then exits (exit 0)
         ├── gosecureshare-nginx-platform    :8181 (host) → Platform UI + API
-        ├── gosecureshare-nginx-recipient   :80   (host) → Recipient share page
+        ├── gosecureshare-nginx-recipient   :8282 (host) → Recipient share page
         ├── gosecureshare-ui-platform       Next.js 14 — login + admin dashboard
         ├── gosecureshare-ui-recipient      Next.js 14 — /s/[uuid] share page
         ├── gosecureshare-api-platform      FastAPI — auth, secrets, admin
@@ -543,8 +509,8 @@ All configuration is stored in `/opt/gosecureshare/.env`, auto-generated and sec
 | `GSS_ADMIN_EMAIL`           | ✅        | Admin account email address                           |
 | `GSS_ADMIN_PASSWORD`        | ✅        | Admin password (minimum 12 characters)                |
 | `GSS_INSTALLED_VERSION`     | ✅        | Version tag pinned after successful install/upgrade   |
-| `PLATFORM_HTTP_PORT`        | &mdash;  | Platform internal port (default `8181`)               |
-| `RECIPIENT_HTTP_PORT`       | &mdash;  | Recipient internal port (default `80`)                |
+| `PLATFORM_HTTP_PORT`        | &mdash;  | Platform internal host port (default `8181`)          |
+| `RECIPIENT_HTTP_PORT`       | &mdash;  | Recipient internal host port (default `8282`)         |
 | `LDAP_ENABLED`              | &mdash;  | Enable LDAP / Active Directory auth (`false`)         |
 | `DEBUG`                     | &mdash;  | Enable debug mode &mdash; always `false` in production |
 
@@ -586,7 +552,7 @@ sudo docker compose -f /opt/gosecureshare/docker-compose.yml logs
 
 ```bash
 sudo lsof -i :8181
-sudo lsof -i :80
+sudo lsof -i :8282
 ```
 
 Re-run `install.sh` and choose different ports, or edit `PLATFORM_HTTP_PORT` /
@@ -611,11 +577,16 @@ PAT includes the `repo` scope in addition to `read:packages`, then re-run the in
 sudo ./install.sh
 ```
 
-**API container unhealthy**
+**Container unhealthy**
 
 ```bash
-curl http://localhost:80/healthz
-# Expected response: {"ok": true}
+# Platform API + UI
+curl http://localhost:8181/healthz
+# Expected: {"ok": true}
+
+# Recipient API + UI
+curl http://localhost:8282/healthz
+# Expected: {"ok": true}
 ```
 
 **Login fails after fresh install**
