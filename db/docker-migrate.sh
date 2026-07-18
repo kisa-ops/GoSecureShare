@@ -10,7 +10,7 @@
 # Tables created:
 #   gss_platform  → schema_migrations, users, role_definitions, secret_controls,
 #                    audit_logs, user_audit_logs, platform_settings
-#   gss_recipient → secrets, retrieval_logs
+#   gss_recipient → secrets, retrieval_logs, audit_logs
 # =============================================================================
 set -e
 
@@ -28,7 +28,7 @@ set -e
 #       SELECT filename, applied_at FROM gss_platform.schema_migrations
 #       WHERE filename LIKE 'schema-version-%' ORDER BY applied_at DESC LIMIT 1;
 # ---------------------------------------------------------------------------
-SCHEMA_VERSION="1.1.0"
+SCHEMA_VERSION="1.2.1"
 
 PGHOST="${POSTGRES_HOST:-postgres}"
 PGPORT=5432
@@ -165,6 +165,8 @@ CREATE TABLE IF NOT EXISTS gss_platform.audit_logs (
     detail      JSONB,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS ix_platform_audit_logs_secret_uuid ON gss_platform.audit_logs (secret_uuid);
+CREATE INDEX IF NOT EXISTS ix_platform_audit_logs_created_at  ON gss_platform.audit_logs (created_at);
 
 -- ── gss_platform.user_audit_logs  (models/user_audit.py) ─────────────────
 -- FIX: actor_id and target_user_id are BIGINT to match users.id (BIGSERIAL).
@@ -245,6 +247,24 @@ CREATE TABLE IF NOT EXISTS gss_recipient.retrieval_logs (
 CREATE INDEX IF NOT EXISTS ix_retrieval_logs_secret_uuid ON gss_recipient.retrieval_logs (secret_uuid);
 CREATE INDEX IF NOT EXISTS ix_retrieval_logs_created_at  ON gss_recipient.retrieval_logs (created_at);
 
+-- ── gss_recipient.audit_logs  (models/audit.py) ───────────────────────────
+-- Records every reveal/access event on the recipient side.
+-- Columns match the INSERT issued by routers/retrieve.py:
+--   secret_uuid, actor_uuid, actor_type, ip_address, action, success, detail
+CREATE TABLE IF NOT EXISTS gss_recipient.audit_logs (
+    id          BIGSERIAL   PRIMARY KEY,
+    secret_uuid UUID        NOT NULL,
+    actor_uuid  UUID,
+    actor_type  VARCHAR(50) NOT NULL DEFAULT 'recipient',
+    ip_address  INET,
+    action      VARCHAR(50) NOT NULL,
+    success     BOOLEAN     NOT NULL DEFAULT TRUE,
+    detail      JSONB,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_recipient_audit_logs_secret_uuid ON gss_recipient.audit_logs (secret_uuid);
+CREATE INDEX IF NOT EXISTS ix_recipient_audit_logs_created_at  ON gss_recipient.audit_logs (created_at);
+
 SQL
 
 # ---------------------------------------------------------------------------
@@ -273,6 +293,7 @@ END;
 \$\$;
 
 GRANT USAGE ON SCHEMA gss_platform  TO "${PLAT}";
+GRANT USAGE ON SCHEMA gss_platform  TO "${RECP}";
 GRANT USAGE ON SCHEMA gss_recipient TO "${PLAT}";
 GRANT USAGE ON SCHEMA gss_recipient TO "${RECP}";
 
@@ -305,22 +326,13 @@ SQL
 # ---------------------------------------------------------------------------
 # Step 6: Seed built-in roles
 # ---------------------------------------------------------------------------
-echo "[migrate] Step 6: Seed built-in roles"
-run <<'SQL'
-INSERT INTO gss_platform.role_definitions
-  (name, description, is_builtin, is_default,
-   can_create_secret, can_manage_secret, can_view_audit,
-   can_upload_file,   can_set_passphrase, can_set_ip_whitelist,
-   can_burn_after_reading, can_view_all_secrets, can_revoke_any_secret)
-VALUES
-  ('admin',  'Full platform access', TRUE, TRUE,
-   TRUE, TRUE, TRUE,  TRUE,  TRUE,  TRUE,  TRUE,  TRUE,  TRUE),
-  ('user',   'Standard user',        TRUE, TRUE,
-   TRUE, TRUE, FALSE, FALSE, TRUE,  TRUE,  TRUE,  FALSE, FALSE),
-  ('viewer', 'Read-only observer',   TRUE, TRUE,
-   FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE, FALSE)
-ON CONFLICT (name) DO NOTHING;
-SQL
+# NOTE: Role definitions (capabilities + controls) are seeded exclusively by
+# seed_system_roles() in the platform API (main.py) on every startup.
+# Do NOT seed roles here — the authoritative role names and capability sets
+# live in _SYSTEM_ROLES in main.py. Inserting rows here would create stale
+# entries with wrong names (admin/user/viewer) that the app never references,
+# pollute the role_definitions table, and confuse the admin UI role list.
+echo "[migrate] Step 6: Skipped (roles seeded by platform API on startup)"
 
 # ---------------------------------------------------------------------------
 # Step 7: Seed platform_settings defaults
