@@ -926,6 +926,8 @@ PLATFORM_DOMAIN=$(grep '^PLATFORM_DOMAIN=' "${ENV_FILE}" 2>/dev/null | cut -d= -
 RECIPIENT_DOMAIN=$(grep '^RECIPIENT_DOMAIN=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
 PLATFORM_HTTP_PORT=$(grep '^PLATFORM_HTTP_PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
 RECIPIENT_HTTP_PORT=$(grep '^RECIPIENT_HTTP_PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
+SSL_TYPE=$(grep '^SSL_TYPE=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
+PLATFORM_HTTPS_PORT=$(grep '^PLATFORM_HTTPS_PORT=' "${ENV_FILE}" 2>/dev/null | cut -d= -f2 | tr -d '"' || echo "")
 
 echo ""
 echo -e "${BOLD}${GREEN}╔$(printf '═%.0s' {1..62})╗${RESET}"
@@ -1007,8 +1009,14 @@ echo -e "${BOLD}${GREEN}║  ✓  GoSecureShare is up and healthy.              
 echo -e "${BOLD}${GREEN}╚$(printf '═%.0s' {1..62})╝${RESET}"
 echo ""
 
+# Print access URLs — in certfiles mode the platform listens on
+# PLATFORM_HTTPS_PORT (e.g. 8443), NOT 443. Always show the exact URL.
 if systemctl is-active --quiet nginx 2>/dev/null && [[ -n "${PLATFORM_DOMAIN}" ]]; then
-  echo -e "  ${CYAN}Platform:   ${RESET}https://${PLATFORM_DOMAIN}"
+  if [[ "${SSL_TYPE}" == "certfiles" && -n "${PLATFORM_HTTPS_PORT}" ]]; then
+    echo -e "  ${CYAN}Platform:   ${RESET}https://${PLATFORM_DOMAIN}:${PLATFORM_HTTPS_PORT}"
+  else
+    echo -e "  ${CYAN}Platform:   ${RESET}https://${PLATFORM_DOMAIN}"
+  fi
   echo -e "  ${CYAN}Recipient:  ${RESET}https://${RECIPIENT_DOMAIN}"
 elif [[ -n "${PLATFORM_HTTP_PORT}" ]]; then
   _SERVER_IP=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "<server-ip>")
