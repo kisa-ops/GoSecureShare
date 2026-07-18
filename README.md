@@ -1,16 +1,15 @@
 <p align="center">
   <a href="https://gosecureshare.com">
-    <img src="logo.svg" alt="GoSecureShare" width="200" />
+    <img src="https://raw.githubusercontent.com/kisa-ops/GoSecureShare/logo.svg" alt="GoSecureShare" width="120" />
   </a>
 </p>
 
-<h1 align="center">
-  <a href="https://gosecureshare.com">GoSecureShare</a>
-</h1>
+<h1 align="center">GoSecureShare</h1>
 
 <p align="center">
   Enterprise-grade, self-hosted <strong>zero-knowledge secret sharing</strong>.<br/>
-  Share passwords, API keys, and files via one-time secure links — fully air-gapped with Docker Compose.
+  Share passwords, API keys, and sensitive files via one-time secure links &mdash;<br/>
+  fully self-contained with Docker Compose. No cloud dependency. No data leaves your server.
 </p>
 
 <p align="center">
@@ -19,153 +18,160 @@
 
 ---
 
-## What you need
+## What You Need
 
-Just **1 file**. The installer auto-fetches the DB files and writes all configuration.
+Just **one file**. The installer is self-bootstrapping &mdash; it auto-fetches all required
+library modules from GitHub before installation begins.
 
 ```
-gosecureshare/
-└── install.sh    ← Run this (canonical location: production/install.sh)
+kisa-ops/GoSecureShare
+└── install.sh    ← The only file you need to download
 ```
 
-The installer downloads `db/init.sql` and `db/docker-migrate.sh` directly from GitHub during setup. If the repo is private, supply a token with `repo` scope (see [Private Registry](#private-ghcr-registry--private-repo) below).
+> The installer downloads its own `lib/` modules and `db/` files directly from GitHub
+> during setup, using the GitHub PAT you provide at the start of the interactive wizard.
 
 ---
 
 ## Prerequisites
 
-| Requirement | Minimum version | Install |
-|---|---|---|
-| Docker Engine | 24+ | `curl -fsSL https://get.docker.com \| sh` |
-| Docker Compose plugin | v2 | `apt-get install -y docker-compose-plugin` |
-| `curl` | any | `apt-get install -y curl` |
-| `openssl` | any | `apt-get install -y openssl` |
+| Requirement           | Minimum version | How to install                                 |
+|-----------------------|-----------------|------------------------------------------------|
+| Docker Engine         | 24+             | `curl -fsSL https://get.docker.com \| sh`      |
+| Docker Compose plugin | v2              | `apt-get install -y docker-compose-plugin`     |
+| `curl`                | any             | `apt-get install -y curl`                      |
+| `openssl`             | any             | `apt-get install -y openssl`                   |
 
-> No local PostgreSQL installation needed — it runs as a dedicated container.
+> **PostgreSQL is not required on the host.** It runs as a dedicated container inside
+> the Docker stack.
 
-> ⚠️ All `docker` commands must be run with `sudo` unless your user has been added to the `docker` group.
+> ⚠️ All `docker` commands require `sudo` unless your user has been added to the `docker`
+> group (`sudo usermod -aG docker $USER`).
 
 ---
 
 ## Quick Install
 
-### 1. Download the installer
+### 1 &mdash; Download the installer
 
 ```bash
 mkdir gosecureshare && cd gosecureshare
-curl -fsSL https://raw.githubusercontent.com/kisa-ops/GoSecureShare/main/production/install.sh -o install.sh
+curl -fsSL https://raw.githubusercontent.com/kisa-ops/GoSecureShare/main/install.sh -o install.sh
 chmod +x install.sh
 ```
 
-> If the repository is **private**, add `-H "Authorization: Bearer <your-token>"` to the curl command,
-> or download the file via `gh repo clone` / SFTP and copy it to the server.
+> If the repository is **private**, add `-H "Authorization: Bearer <your-token>"` to the
+> `curl` command above, or transfer the file to the server via SFTP.
 
-### 2. Run the installer
+### 2 &mdash; Run the installer
 
 ```bash
 sudo ./install.sh
 ```
 
-The installer will:
+The interactive wizard guides you through every step:
 
-1. ✅ Verify prerequisites (Docker, Compose, curl, openssl)
-2. 🔍 Auto-detect the latest stable release from GitHub Releases
-3. 🐳 Pull all 6 container images (`ghcr.io/kisa-ops/*`, `postgres:16-alpine`, `nginx:1.27-alpine`)
-4. 📁 Create the installation directory at `/opt/gosecureshare/`
-5. 🔗 Fetch `db/init.sql` and `db/docker-migrate.sh` directly from GitHub
-6. ⚙️  Prompt for ports and admin credentials
-7. 🔐 Auto-generate all cryptographic secrets (AES-256 key, JWT secret, DB passwords)
-8. 📝 Write `/opt/gosecureshare/.env` (secured with `chmod 600`)
-9. 🚀 Start all 8 containers via Docker Compose
-10. ⏳ Wait for database migration to complete successfully
-11. ❤️  Wait for platform API to become healthy
-12. ✔️  Verify login endpoint is reachable before declaring success
+1. ✅ **GHCR credentials** &mdash; prompted first; your GitHub PAT (`read:packages` scope)
+   is used to pull images and to bootstrap the `lib/` modules from GitHub
+2. ✅ **Prerequisites** &mdash; Docker, Compose, `curl`, and `openssl` are verified
+3. 🔍 **Version** &mdash; latest stable release auto-detected from GitHub Releases
+   (override: `GSS_VERSION=x.y.z sudo ./install.sh`)
+4. 🐳 **Image pull** &mdash; all 6 container images pulled from GHCR and Docker Hub
+5. 📁 **Install directory** &mdash; `/opt/gosecureshare/` created with all runtime files
+6. 🔗 **DB files** &mdash; `db/init.sql` and `db/docker-migrate.sh` fetched from GitHub
+7. ⚙️  **Configuration** &mdash; ports, admin email, and admin password prompted interactively
+8. 🔐 **Secrets** &mdash; AES-256 encryption key, JWT secret, and DB passwords auto-generated
+9. 🔒 **SSL** &mdash; choose between your own reverse proxy or providing certificate
+   files for host-level Nginx TLS termination
+10. 📝 **`.env` written** &mdash; secured at `/opt/gosecureshare/.env` (`chmod 600`, root-only)
+11. 🚀 **Stack started** &mdash; all 8 containers started via Docker Compose
+12. ⏳ **DB migration** &mdash; idempotent schema bootstrap waits to complete
+13. ❤️  **Health checks** &mdash; all containers polled until healthy
+14. ✔️  **Login verified** &mdash; platform login endpoint confirmed reachable before success
 
-### 3. Open in browser
+### 3 &mdash; Open in your browser
 
-After install, the summary screen shows your URLs:
+After installation, the summary screen displays your URLs:
 
-| Interface | Default URL | Purpose |
-|---|---|---|
-| **Platform (Admin / Staff)** | `http://<server-ip>:80` | Login · create secrets · admin dashboard |
-| **Recipient Portal** | `http://<server-ip>:8181` | View a shared one-time secret |
-| **Health check** | `http://<server-ip>:80/healthz` | Liveness probe |
+| Interface                    | Default internal port | Purpose                                       |
+|------------------------------|-----------------------|-----------------------------------------------|
+| **Platform** (Admin / Staff) | `8181`                | Login &middot; create secrets &middot; admin dashboard |
+| **Recipient Portal**         | `80`                  | View a shared one-time secret link            |
+
+> These internal ports sit **behind your reverse proxy or host Nginx**, which terminates
+> TLS and forwards to them. See [SSL & Reverse Proxy](#ssl--reverse-proxy) below.
 
 ---
 
-## Install Options
-
-### Pin to a specific version
+## Pin to a Specific Version
 
 ```bash
 GSS_VERSION=2.3.1 sudo ./install.sh
 ```
 
-### Custom ports
+Version pinning controls which GHCR image tags are pulled:
 
-The installer prompts for platform and recipient ports interactively. You can also edit `/opt/gosecureshare/.env` after install and restart:
-
-```bash
-sudo docker compose -f /opt/gosecureshare/docker-compose.yml up -d
+```
+ghcr.io/kisa-ops/gosecureshare-api-platform:2.3.1
+ghcr.io/kisa-ops/gosecureshare-api-recipient:2.3.1
+ghcr.io/kisa-ops/gosecureshare-frontend-platform:2.3.1
+ghcr.io/kisa-ops/gosecureshare-frontend-recipient:2.3.1
 ```
 
-### Private GHCR registry / private repo
+---
 
-When the **GHCR images are private**, a GitHub PAT is required for `docker login`. When the **source repository is also private**, the same token (with an additional scope) is used to fetch the DB files.
+## SSL & Reverse Proxy
 
-#### Step 1 — Create a GitHub PAT
+The installer presents two SSL options during setup:
 
-Go to **GitHub → Settings → Developer settings → Personal access tokens (classic)** and create a token with:
+### Option A &mdash; Your own reverse proxy *(recommended)*
 
-| Scope | Required for |
-|---|---|
-| `read:packages` | Pulling private GHCR images |
-| `repo` | Fetching `init.sql` / `docker-migrate.sh` from a private repo |
+Choose this if you already have Cloudflare, Nginx, HAProxy, or any other TLS-terminating
+proxy in front of the server. Docker binds its ports to `127.0.0.1` only; your proxy
+handles HTTPS and forwards traffic:
 
-> If your images are public but the source repo is private, you only need `repo`.
-> If only images are private, `read:packages` is sufficient.
+| Proxy target                 | Internal address         |
+|------------------------------|--------------------------|
+| Platform (admin / staff UI)  | `http://127.0.0.1:8181`  |
+| Recipient (share portal)     | `http://127.0.0.1:80`    |
 
-#### Step 2 — Export credentials and run
+### Option B &mdash; Provide certificate files
 
-```bash
-export GHCR_USERNAME=your-github-username
-export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-export GHCR_IMAGES_PRIVATE=true       # causes early abort if creds are missing
-sudo -E ./install.sh                  # -E passes env vars through sudo
-```
+Choose this if GoSecureShare manages TLS directly on the host. The installer configures
+a host Nginx instance as a TLS terminator. You will be prompted to provide a certificate,
+private key, and (optionally) a CA bundle &mdash; either as a file path or by pasting the
+PEM content &mdash; separately for the Platform and Recipient endpoints.
 
-> ⚠️ The `-E` flag is **required**. Without it, `sudo` strips the environment and the script
-> never receives the credentials, leading to a silent pull failure.
+---
 
-#### How the token is used internally
+## GHCR Credentials
 
-| Step | What happens |
-|---|---|
-| **STEP 4** | `docker login ghcr.io` with `GHCR_USERNAME` + `GHCR_TOKEN` |
-| **STEP 7** | `curl -H "Authorization: Bearer $GHCR_TOKEN"` to fetch DB files from `raw.githubusercontent.com` |
-| **STEP 2** | GitHub Releases API call also uses the token (needed for private repos) |
+GoSecureShare images are hosted on GitHub Container Registry (GHCR). A GitHub Personal
+Access Token (PAT) is **required** and is collected interactively at the start of the
+installer. There is no way to skip this step.
 
-#### Early-abort mode (`GHCR_IMAGES_PRIVATE=true`)
+### Required PAT scopes
 
-Setting this flag makes the installer **abort immediately** at STEP 4 with a clear error if either `GHCR_USERNAME` or `GHCR_TOKEN` is missing — rather than proceeding and failing silently during the `docker pull` later.
+| Scope           | Required for                                                            |
+|-----------------|-------------------------------------------------------------------------|
+| `read:packages` | Pulling container images from `ghcr.io/kisa-ops`                       |
+| `repo`          | Fetching `lib/` and `db/` files when the source repository is private  |
 
-Without the flag the script still warns and attempts a public pull, which is useful when only some images are private or during local testing.
+> If images are public but the source repo is private, include both scopes.
+> If only images are private, `read:packages` alone is sufficient.
 
-#### Combined example (private images + private repo + pinned version)
+### Generate a PAT
 
-```bash
-export GHCR_USERNAME=your-github-username
-export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-export GHCR_IMAGES_PRIVATE=true
-export GSS_VERSION=1.2.3
-sudo -E ./install.sh
-```
+Go to **GitHub &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens
+(classic)** and create a token with the scopes above. Paste it when prompted by the
+installer.
 
 ---
 
 ## Platform Administration
 
-The installer writes five management scripts to `/opt/gosecureshare/`. All scripts must be run as `root` from that directory.
+The installer writes management scripts to `/opt/gosecureshare/`. Always run them as
+`root` from that directory.
 
 ```
 /opt/gosecureshare/
@@ -177,62 +183,59 @@ The installer writes five management scripts to `/opt/gosecureshare/`. All scrip
 
 ---
 
-### Upgrading (`upgrade.sh`)
+### Upgrading &mdash; `upgrade.sh`
 
-`upgrade.sh` upgrades GoSecureShare to a newer version with full safety guarantees. If anything goes wrong after the new images are applied, it **automatically rolls back** to the previous running version.
+`upgrade.sh` upgrades GoSecureShare with full safety guarantees. If health checks fail
+after applying new images, it **automatically rolls back** to the previously running version.
 
-#### Safety steps performed
+#### Safety steps
 
-| Step | What happens |
-|---|---|
-| **1. Pre-flight** | Checks Docker daemon is running, ≥2 GB free disk, GHCR reachable, stack running |
-| **2. Snapshot** | Copies `docker-compose.yml` + `.env` to `.upgrade-snapshot/` before any change |
-| **3. DB backup** | Full `pg_dump` into `.upgrade-snapshot/db-backup-<version>.sql` |
-| **4. Pull first** | All 4 new images pulled completely before the live stack is touched |
-| **5. Apply** | Image tags patched in `docker-compose.yml`, stack restarted |
-| **6. Health checks** | All 4 app containers polled for healthy status (120 s timeout each) |
-| **7. Auto-rollback** | On any health failure: snapshot restored, old images re-pulled, stack restarted on old version |
-| **8. Version pin** | `GSS_INSTALLED_VERSION` in `.env` updated **only** after all health checks pass |
+| Step | What happens                                                                            |
+|------|-----------------------------------------------------------------------------------------|
+| 1    | Pre-flight: Docker daemon running, ≥2 GB free disk, GHCR reachable, stack running      |
+| 2    | Snapshot: `docker-compose.yml` and `.env` copied to `.upgrade-snapshot/`               |
+| 3    | DB backup: full `pg_dump` written to `.upgrade-snapshot/db-backup-<version>.sql`       |
+| 4    | Pull first: all 4 new images pulled completely before the live stack is touched         |
+| 5    | Apply: image tags patched in `docker-compose.yml`, stack restarted                     |
+| 6    | Health checks: all 4 app containers polled (120 s timeout per container)               |
+| 7    | Auto-rollback: on any failure, snapshot restored and old images re-applied             |
+| 8    | Version pin: `GSS_INSTALLED_VERSION` in `.env` updated only after all checks pass      |
 
 #### Usage
 
 ```bash
 cd /opt/gosecureshare
 
-# Upgrade to the latest stable release (auto-detected)
+# Upgrade to the latest stable release
 sudo ./upgrade.sh
 
 # Upgrade to a specific version
 sudo ./upgrade.sh 2.5.0
-
-# Upgrade with private registry credentials
-export GHCR_USERNAME=your-github-username
-export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-sudo -E ./upgrade.sh
-
-# Upgrade to specific version with credentials
-export GHCR_USERNAME=your-github-username
-export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-sudo -E ./upgrade.sh 2.5.0
 ```
 
-#### What is kept after a successful upgrade
+> The installer prompts for your GitHub PAT during the upgrade if GHCR credentials are
+> needed to pull the new images.
+
+#### Preserved files after a successful upgrade
 
 ```
 /opt/gosecureshare/.upgrade-snapshot/
 ├── docker-compose.yml.<previous-version>   ← previous compose file
-├── .env.<previous-version>                  ← previous .env (chmod 600)
-└── db-backup-<previous-version>.sql         ← full database dump
+├── .env.<previous-version>                 ← previous .env  (chmod 600)
+└── db-backup-<previous-version>.sql        ← full database dump
 ```
 
-These files are kept permanently so you can manually restore to a previous version if needed. They are **not** automatically deleted.
+These files are **never automatically deleted** &mdash; keep them until you are confident
+the upgrade is stable.
 
-#### Manual rollback (if needed)
+#### Manual rollback
 
 ```bash
-# Restore config files
-cp /opt/gosecureshare/.upgrade-snapshot/docker-compose.yml.<version> /opt/gosecureshare/docker-compose.yml
-cp /opt/gosecureshare/.upgrade-snapshot/.env.<version>                /opt/gosecureshare/.env
+# Restore configuration files
+cp /opt/gosecureshare/.upgrade-snapshot/docker-compose.yml.<version> \
+   /opt/gosecureshare/docker-compose.yml
+cp /opt/gosecureshare/.upgrade-snapshot/.env.<version> \
+   /opt/gosecureshare/.env
 chmod 600 /opt/gosecureshare/.env
 
 # Restart on the old version
@@ -245,21 +248,20 @@ docker exec -i gosecureshare-postgres psql -U gss_superuser gosecureshare \
 
 ---
 
-### Stopping for maintenance (`stop.sh`)
+### Stopping for maintenance &mdash; `stop.sh`
 
-`stop.sh` gracefully shuts down the stack. It stops app containers first, waits for in-flight requests to drain, then stops the database last.
+`stop.sh` gracefully shuts down the entire stack in the correct order, ensuring no data
+is lost and in-flight requests are drained before containers are stopped.
 
 #### What it does
 
-| Step | Action |
-|---|---|
-| **1** | Stops host Nginx (if running in certfiles/proxy SSL mode) so no new connections arrive. Leaves a `.nginx-was-running` marker for `start.sh`. |
-| **2** | Waits a drain period for in-flight requests to complete (default: 10 s). |
-| **3** | Stops app containers in safe order: nginx → frontend → api. |
-| **4** | Stops PostgreSQL last, after all app containers are down. |
-| **5** | Prints final `docker compose ps` status table. |
-
-#### Usage
+| Step | Action                                                                                      |
+|------|---------------------------------------------------------------------------------------------|
+| 1    | Stops host Nginx (if running in SSL cert mode); leaves a marker for `start.sh`             |
+| 2    | Waits a drain period for in-flight requests to complete (default: 10 s)                    |
+| 3    | Stops app containers in safe order: nginx &rarr; frontend &rarr; API                       |
+| 4    | Stops PostgreSQL last, after all app containers are fully down                             |
+| 5    | Prints final `docker compose ps` status table                                               |
 
 ```bash
 cd /opt/gosecureshare
@@ -274,37 +276,33 @@ GSS_DRAIN_SECONDS=0 sudo ./stop.sh
 GSS_DRAIN_SECONDS=30 sudo ./stop.sh
 ```
 
-> Data is fully preserved. PostgreSQL volumes are **not** removed.
+> PostgreSQL volumes are **not** removed. All data is fully preserved.
 
 ---
 
-### Starting after maintenance (`start.sh`)
+### Starting after maintenance &mdash; `start.sh`
 
-`start.sh` starts the full stack and confirms all services are healthy before returning.
+`start.sh` starts the full stack and confirms all services are healthy before returning
+control to the terminal.
 
 #### What it does
 
-| Step | Action |
-|---|---|
-| **1** | Pre-flight checks: Docker daemon running, `.env` and `docker-compose.yml` present. |
-| **2** | `docker compose up -d` — starts all containers. |
-| **3** | Resumes host Nginx if the `.nginx-was-running` marker was left by `stop.sh`. Runs `nginx -t` config test first. |
-| **4** | Polls all 4 app containers until healthy (120 s timeout). Exits with error if any remain unhealthy. |
-| **5** | Prints Platform and Recipient access URLs on success. |
-
-#### Usage
+| Step | Action                                                                                      |
+|------|---------------------------------------------------------------------------------------------|
+| 1    | Pre-flight: Docker daemon running, `.env` and `docker-compose.yml` present                 |
+| 2    | `docker compose up -d` &mdash; starts all containers                                        |
+| 3    | Resumes host Nginx if the `stop.sh` marker is present; runs `nginx -t` first              |
+| 4    | Polls all 4 app containers until healthy (120 s timeout); exits with error if any fail    |
+| 5    | Prints Platform and Recipient access URLs on success                                        |
 
 ```bash
-cd /opt/gosecureshare
-
-# Start the stack
-sudo ./start.sh
+cd /opt/gosecureshare && sudo ./start.sh
 ```
 
-#### Typical maintenance window flow
+#### Typical maintenance window
 
 ```bash
-# 1. Take a backup before starting work
+# 1. Back up before starting work
 sudo ./backup.sh
 
 # 2. Stop the stack
@@ -318,21 +316,22 @@ sudo ./start.sh
 
 ---
 
-### Backup (`backup.sh`)
+### Backup &mdash; `backup.sh`
 
-`backup.sh` creates a complete, timestamped backup archive of the database and all configuration files. The archive is self-contained — enough to fully restore a fresh installation.
+`backup.sh` creates a complete, timestamped, self-contained backup archive. The archive
+holds everything needed to fully restore a fresh installation from scratch.
 
 #### What is backed up
 
-| Artifact | File in archive | Notes |
-|---|---|---|
-| **Database** | `database.sql.gz` | Full `pg_dump`, gzip-compressed |
-| **Environment** | `config/.env` | `chmod 600` preserved inside archive |
-| **Compose file** | `config/docker-compose.yml` | Exact image tags and port bindings |
-| **Nginx configs** | `config/nginx/platform.conf`, `recipient.conf` | Reverse proxy routing rules |
-| **DB bootstrap** | `db/docker-migrate.sh`, `db/init.sql` | Schema + seed for a fresh DB |
-| **Scripts** | `scripts/upgrade.sh`, `start.sh`, `stop.sh`, `backup.sh` | Management scripts |
-| **Manifest** | `MANIFEST.txt` | Version, timestamp, hostname, file list |
+| Artifact              | File in archive                                           | Notes                             |
+|-----------------------|-----------------------------------------------------------|-----------------------------------|
+| Database              | `database.sql.gz`                                         | Full `pg_dump`, gzip-compressed   |
+| Environment           | `config/.env`                                             | `chmod 600` preserved in archive  |
+| Compose file          | `config/docker-compose.yml`                               | Exact image tags and port config  |
+| Nginx configs         | `config/nginx/platform.conf`, `recipient.conf`            | Reverse proxy routing rules       |
+| DB bootstrap          | `db/docker-migrate.sh`, `db/init.sql`                     | Schema + seed for a fresh DB      |
+| Management scripts    | `scripts/upgrade.sh`, `start.sh`, `stop.sh`, `backup.sh` | All admin scripts                 |
+| Manifest              | `MANIFEST.txt`                                            | Version, timestamp, file list     |
 
 #### Output
 
@@ -343,7 +342,8 @@ sudo ./start.sh
 
 #### Retention
 
-The script automatically **prunes old archives**, keeping only the N most recent. Default is 7; override with `GSS_BACKUP_KEEP`.
+Old archives are pruned automatically. Default: keep the 7 most recent. Override with
+`GSS_BACKUP_KEEP=N`.
 
 #### Usage
 
@@ -353,7 +353,7 @@ cd /opt/gosecureshare
 # Standard backup
 sudo ./backup.sh
 
-# Keep last 14 backups instead of 7
+# Keep last 14 backups
 GSS_BACKUP_KEEP=14 sudo ./backup.sh
 
 # Write backups to an external mount
@@ -363,83 +363,85 @@ GSS_BACKUP_DIR=/mnt/nas/gss-backups sudo ./backup.sh
 sudo ./backup.sh --no-compress
 ```
 
-#### Automating with cron
+#### Automate with cron
 
-Add to `/etc/cron.d/gosecureshare-backup` (daily at 02:00):
+Add to `/etc/cron.d/gosecureshare-backup` for a daily backup at 02:00:
 
 ```
 0 2 * * * root /opt/gosecureshare/backup.sh >> /var/log/gss-backup.log 2>&1
 ```
 
-#### Restoring the database from a backup
+#### Restoring the database
 
 ```bash
-# Extract the database dump from the archive
+# Extract the dump
 tar -xzf /opt/gosecureshare/backups/gss-backup-2.5.0-20260716T020000Z.tar.gz \
     --strip-components=1 '*/database.sql.gz'
 
 # Decompress
 gunzip database.sql.gz
 
-# Restore (stack must be running with postgres healthy)
+# Restore (stack must be running and PostgreSQL must be healthy)
 docker exec -i gosecureshare-postgres psql \
     -U gss_superuser gosecureshare < database.sql
 ```
 
 ---
 
-### Quick reference
+### Quick Reference
 
-| Task | Command |
-|---|---|
-| Upgrade to latest | `cd /opt/gosecureshare && sudo ./upgrade.sh` |
-| Upgrade to version | `sudo ./upgrade.sh 2.5.0` |
-| Stop for maintenance | `sudo ./stop.sh` |
-| Start after maintenance | `sudo ./start.sh` |
-| Take a manual backup | `sudo ./backup.sh` |
-| Check container status | `sudo docker compose ps` |
-| Tail all logs | `sudo docker compose logs -f` |
-| Tail one service | `sudo docker compose logs -f api_platform` |
+| Task                    | Command                                              |
+|-------------------------|------------------------------------------------------|
+| Upgrade to latest       | `cd /opt/gosecureshare && sudo ./upgrade.sh`         |
+| Upgrade to version      | `sudo ./upgrade.sh 2.5.0`                            |
+| Stop for maintenance    | `sudo ./stop.sh`                                     |
+| Start after maintenance | `sudo ./start.sh`                                    |
+| Take a manual backup    | `sudo ./backup.sh`                                   |
+| Check container status  | `sudo docker compose ps`                             |
+| Tail all logs           | `sudo docker compose logs -f`                        |
+| Tail one service        | `sudo docker compose logs -f api_platform`           |
 
 ---
 
 ## Clean Reinstall
 
-### 1. Stop and wipe the old installation
+### 1 &mdash; Stop and wipe the old installation
 
 ```bash
 cd /opt/gosecureshare
 sudo docker compose down -v
 ```
 
-> ⚠️ The `-v` flag removes all volumes including PostgreSQL data. Required so the DB migration and admin seed run clean on the next start.
+> ⚠️ The `-v` flag removes all Docker volumes, including PostgreSQL data. This is required
+> so the database migration and admin seed scripts run clean on the next install.
 
-### 2. Remove the install directory
+### 2 &mdash; Remove the install directory
 
 ```bash
 sudo rm -rf /opt/gosecureshare
 ```
 
-### 3. Remove old images (optional but recommended)
+### 3 &mdash; Remove old images *(optional but recommended)*
 
 ```bash
-sudo docker rmi $(sudo docker images --format '{{.ID}}' --filter 'reference=*gosecureshare*') 2>/dev/null || true
+sudo docker rmi $(sudo docker images --format '{{.ID}}' \
+    --filter 'reference=*gosecureshare*') 2>/dev/null || true
 sudo docker rmi postgres:16-alpine nginx:1.27-alpine 2>/dev/null || true
 ```
 
-### 4. Re-run the installer
+### 4 &mdash; Re-run the installer
 
 ```bash
 cd ~/gosecureshare && sudo ./install.sh
 ```
 
-### 5. Verify after install
+### 5 &mdash; Verify after install
 
 ```bash
 cd /opt/gosecureshare
-sudo docker compose ps                         # all containers healthy/running
-sudo docker logs gosecureshare-db-migrate      # should end with exit 0
-curl http://localhost/healthz                  # → {"ok": true}
+sudo docker compose ps                       # all containers healthy / running
+sudo docker logs gosecureshare-db-migrate    # should end with exit code 0
+curl http://localhost:80/healthz             # → {"ok": true}
 ```
 
 ---
@@ -449,123 +451,133 @@ curl http://localhost/healthz                  # → {"ok": true}
 ```
 Host machine
 └── Docker Engine
-    └── gss_internal (bridge network — fully self-contained)
-        ├── gosecureshare-postgres        :5434 (host) / :5432 (internal)
-        ├── gosecureshare-db-migrate      runs once, then exits
-        ├── gosecureshare-nginx-platform  :80   → Platform UI + API
-        ├── gosecureshare-nginx-recipient :8181 → Recipient share page
-        ├── gosecureshare-ui-platform            Next.js 14 — login + dashboard
-        ├── gosecureshare-ui-recipient           Next.js 14 — /s/[uuid] share page
-        ├── gosecureshare-api-platform           FastAPI — auth, secrets, admin
-        └── gosecureshare-api-recipient          FastAPI — public reveal endpoint only
+    └── gss_internal  (bridge network — fully self-contained)
+        ├── gosecureshare-postgres          :5434 (host) / :5432 (internal)
+        ├── gosecureshare-db-migrate        runs once, then exits (exit 0)
+        ├── gosecureshare-nginx-platform    :8181 (host) → Platform UI + API
+        ├── gosecureshare-nginx-recipient   :80   (host) → Recipient share page
+        ├── gosecureshare-ui-platform       Next.js 14 — login + admin dashboard
+        ├── gosecureshare-ui-recipient      Next.js 14 — /s/[uuid] share page
+        ├── gosecureshare-api-platform      FastAPI — auth, secrets, admin
+        └── gosecureshare-api-recipient     FastAPI — public reveal endpoint only
 ```
 
-**Images pulled (6 unique, 8 containers):**
+**6 unique images, 8 containers:**
 
-| Image | Source | Container name |
-|---|---|---|
-| `gosecureshare-api-platform:<ver>` | `ghcr.io/kisa-ops` | `gosecureshare-api-platform` |
-| `gosecureshare-api-recipient:<ver>` | `ghcr.io/kisa-ops` | `gosecureshare-api-recipient` |
-| `gosecureshare-frontend-platform:<ver>` | `ghcr.io/kisa-ops` | `gosecureshare-ui-platform` |
-| `gosecureshare-frontend-recipient:<ver>` | `ghcr.io/kisa-ops` | `gosecureshare-ui-recipient` |
-| `postgres:16-alpine` | Docker Hub | `gosecureshare-postgres` + `gosecureshare-db-migrate` |
-| `nginx:1.27-alpine` | Docker Hub | `gosecureshare-nginx-platform` + `gosecureshare-nginx-recipient` |
+| Image                                   | Source             | Container name                                        |
+|-----------------------------------------|--------------------|-------------------------------------------------------|
+| `gosecureshare-api-platform:<ver>`      | `ghcr.io/kisa-ops` | `gosecureshare-api-platform`                          |
+| `gosecureshare-api-recipient:<ver>`     | `ghcr.io/kisa-ops` | `gosecureshare-api-recipient`                         |
+| `gosecureshare-frontend-platform:<ver>` | `ghcr.io/kisa-ops` | `gosecureshare-ui-platform`                           |
+| `gosecureshare-frontend-recipient:<ver>`| `ghcr.io/kisa-ops` | `gosecureshare-ui-recipient`                          |
+| `postgres:16-alpine`                    | Docker Hub         | `gosecureshare-postgres` + `gosecureshare-db-migrate` |
+| `nginx:1.27-alpine`                     | Docker Hub         | `gosecureshare-nginx-platform` + `gosecureshare-nginx-recipient` |
 
 ---
 
 ## Environment Variables Reference
 
-All configuration is stored in `/opt/gosecureshare/.env` (auto-generated by `install.sh`).
+All configuration is stored in `/opt/gosecureshare/.env`, auto-generated and secured by
+`install.sh` (`chmod 600` &mdash; readable by root only).
 
-| Variable | Required | Description |
-|---|---|---|
-| `POSTGRES_DB` | ✅ | Database name (`gosecureshare`) |
-| `POSTGRES_USER` | ✅ | DB superuser |
-| `POSTGRES_PASSWORD` | ✅ | DB superuser password |
-| `GSS_PLATFORM_DB_USER` | ✅ | App role for platform API |
-| `GSS_PLATFORM_DB_PASSWORD` | ✅ | Platform DB role password |
-| `GSS_RECIPIENT_DB_USER` | ✅ | App role for recipient API |
-| `GSS_RECIPIENT_DB_PASSWORD` | ✅ | Recipient DB role password |
-| `ENCRYPTION_KEY` | ✅ | AES-256 key — 64 hex chars |
-| `JWT_SECRET` | ✅ | JWT signing key |
-| `GSS_ADMIN_EMAIL` | ✅ | Admin account email |
-| `GSS_ADMIN_PASSWORD` | ✅ | Admin password (min 12 chars) |
-| `PLATFORM_HTTP_PORT` | — | Platform port (default `80`) |
-| `RECIPIENT_HTTP_PORT` | — | Recipient port (default `8181`) |
-| `LDAP_ENABLED` | — | Enable LDAP/AD auth (`false`) |
-| `DEBUG` | — | Enable debug mode — `false` in production |
+| Variable                   | Required | Description                                          |
+|----------------------------|----------|------------------------------------------------------|
+| `POSTGRES_DB`              | ✅        | Database name (`gosecureshare`)                      |
+| `POSTGRES_USER`            | ✅        | DB superuser username                                |
+| `POSTGRES_PASSWORD`        | ✅        | DB superuser password                                |
+| `GSS_PLATFORM_DB_USER`     | ✅        | Application role for the platform API                |
+| `GSS_PLATFORM_DB_PASSWORD` | ✅        | Platform DB role password                            |
+| `GSS_RECIPIENT_DB_USER`    | ✅        | Application role for the recipient API               |
+| `GSS_RECIPIENT_DB_PASSWORD`| ✅        | Recipient DB role password                           |
+| `ENCRYPTION_KEY`           | ✅        | AES-256 key &mdash; 64 hex characters, auto-generated |
+| `JWT_SECRET`               | ✅        | JWT signing key, auto-generated                      |
+| `GSS_ADMIN_EMAIL`          | ✅        | Admin account email address                          |
+| `GSS_ADMIN_PASSWORD`       | ✅        | Admin password (minimum 12 characters)               |
+| `PLATFORM_HTTP_PORT`       | &mdash;  | Platform internal port (default `8181`)              |
+| `RECIPIENT_HTTP_PORT`      | &mdash;  | Recipient internal port (default `80`)               |
+| `LDAP_ENABLED`             | &mdash;  | Enable LDAP / Active Directory auth (`false`)        |
+| `DEBUG`                    | &mdash;  | Enable debug mode &mdash; always `false` in production |
 
-> ⚠️ **Never share or commit `.env`.** It is `chmod 600` — readable only by root.
+> ⚠️ **Never share or commit `.env`.** It contains all secrets for your installation.
 
 ---
 
 ## Security Highlights
 
-- 🔒 Every secret is encrypted with **AES-256-GCM** before storage — keys never leave the server
-- 🔥 Burn-after-reading: secrets are deleted from the database immediately after first reveal
-- 🧱 Recipient Nginx blocks all `/api/` admin routes — the admin interface is unreachable on port 8181
+- 🔒 Every secret is encrypted with **AES-256-GCM** before storage &mdash; encryption keys
+  never leave your server
+- 🔥 **Burn-after-reading**: secrets are deleted from the database immediately after the
+  first successful reveal
+- 🧱 Recipient Nginx blocks all `/api/` admin routes &mdash; the admin interface is
+  completely unreachable via the recipient portal port
 - 🔑 Passwords are hashed with **Argon2id**
-- 🧹 Automatic retention sweeper deletes stale secrets (default: 14 days, configurable 1–90 days)
-- 📋 All access attempts are logged to `gss_recipient.audit_logs`
+- 🧹 Automatic retention sweeper deletes stale secrets (default: 14 days, configurable
+  1&ndash;90 days)
+- 📋 All access attempts are written to `gss_recipient.audit_logs`
 - 🚫 Set `DEBUG=false` and restrict `CORS_ORIGINS_RAW` for production hardening
 
 ---
 
 ## Troubleshooting
 
-**`permission denied` on Docker socket?**
+**`permission denied` on Docker socket**
 
 ```bash
-# Always prefix with sudo, or add your user to the docker group:
 sudo usermod -aG docker $USER && newgrp docker
 ```
 
-**Containers not starting?**
+**Containers not starting**
+
 ```bash
 sudo docker compose -f /opt/gosecureshare/docker-compose.yml logs
 ```
 
-**Port conflict?**
+**Port conflict**
+
 ```bash
-lsof -i :80
-lsof -i :8181
-```
-Re-run `install.sh` and choose different ports, or edit `PLATFORM_HTTP_PORT` / `RECIPIENT_HTTP_PORT` in `.env`.
-
-**GHCR pull failed?**
-
-Images may be private. Re-run with credentials and the early-abort flag:
-```bash
-export GHCR_USERNAME=your-github-username
-export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx
-export GHCR_IMAGES_PRIVATE=true
-sudo -E ./install.sh
-```
-Verify your PAT has the correct scopes: `read:packages` for images, `repo` if the source repo is also private.
-
-**DB file fetch failed (private repo)?**
-
-If `init.sql` or `docker-migrate.sh` could not be fetched, check that your token has `repo` scope (not just `read:packages`):
-```bash
-export GHCR_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxx   # must have: read:packages + repo
-sudo -E ./install.sh
+sudo lsof -i :8181
+sudo lsof -i :80
 ```
 
-**API container unhealthy?**
+Re-run `install.sh` and choose different ports, or edit `PLATFORM_HTTP_PORT` /
+`RECIPIENT_HTTP_PORT` in `.env` and restart:
+
 ```bash
-curl http://localhost/healthz
-# → {"ok": true}
+sudo docker compose -f /opt/gosecureshare/docker-compose.yml up -d
 ```
 
-**Login fails after fresh install?**
+**GHCR pull failed**
+
+Images require a GitHub PAT with `read:packages` scope. The installer collects this
+interactively. If a pull fails, verify your PAT has not expired and has the correct scope
+at **GitHub &rarr; Settings &rarr; Developer settings &rarr; Personal access tokens**.
+
+**DB file fetch failed**
+
+If `init.sql` or `docker-migrate.sh` could not be fetched during bootstrap, verify your
+PAT includes the `repo` scope in addition to `read:packages`, then re-run the installer:
+
 ```bash
-# 1. Check migration completed cleanly
+sudo ./install.sh
+```
+
+**API container unhealthy**
+
+```bash
+curl http://localhost:80/healthz
+# Expected response: {"ok": true}
+```
+
+**Login fails after fresh install**
+
+```bash
+# 1. Confirm DB migration completed cleanly
 sudo docker logs gosecureshare-db-migrate
 
-# 2. Check API started correctly
+# 2. Confirm admin seed ran
 sudo docker logs gosecureshare-api-platform | grep -i seed
 
-# 3. Full clean reinstall
+# 3. If in doubt, perform a clean reinstall
 cd /opt/gosecureshare && sudo docker compose down -v
 sudo rm -rf /opt/gosecureshare
 # Then re-run: sudo ./install.sh
