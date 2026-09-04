@@ -184,6 +184,12 @@ services:
       - gss_internal
     expose:
       - "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   nextjs_recipient:
     image: ${TAGGED_FRONTEND_RECIPIENT}
@@ -198,6 +204,12 @@ services:
       - gss_internal
     expose:
       - "3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:3000 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
 
   nginx_platform:
     image: nginx:1.27-alpine
@@ -547,16 +559,26 @@ _wait_healthy() {
   local container="$1" elapsed=0
   info "  Waiting for ${container} to become healthy..."
   while (( elapsed < HEALTH_TIMEOUT )); do
-    local _status
-    _status=$(docker inspect --format='{{.State.Health.Status}}' \
-              "${container}" 2>/dev/null || echo "missing")
-    if [[ "${_status}" == "healthy" ]]; then
-      success "  ${container} is healthy."
-      return 0
-    fi
-    if [[ "${_status}" == "unhealthy" ]]; then
-      warn "  ${container} reported unhealthy."
-      return 1
+    local _has_health
+    _has_health=$(docker inspect --format='{{if .State.Health}}yes{{else}}no{{end}}' "${container}" 2>/dev/null || echo "no")
+    if [[ "${_has_health}" == "yes" ]]; then
+      local _status
+      _status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "missing")
+      if [[ "${_status}" == "healthy" ]]; then
+        success "  ${container} is healthy."
+        return 0
+      fi
+      if [[ "${_status}" == "unhealthy" ]]; then
+        warn "  ${container} reported unhealthy."
+        return 1
+      fi
+    else
+      local _running
+      _running=$(docker inspect --format='{{.State.Running}}' "${container}" 2>/dev/null || echo "false")
+      if [[ "${_running}" == "true" ]]; then
+        success "  ${container} is running."
+        return 0
+      fi
     fi
     sleep "${HEALTH_INTERVAL}"
     (( elapsed += HEALTH_INTERVAL ))
@@ -977,11 +999,18 @@ HEALTH_INTERVAL=5
 _wait_healthy() {
   local container="$1" elapsed=0
   while (( elapsed < HEALTH_TIMEOUT )); do
-    local _status
-    _status=$(docker inspect --format='{{.State.Health.Status}}' \
-              "${container}" 2>/dev/null || echo "missing")
-    [[ "${_status}" == "healthy" ]]   && { success "  ${container} — healthy"; return 0; }
-    [[ "${_status}" == "unhealthy" ]] && { warn   "  ${container} — unhealthy"; return 1; }
+    local _has_health
+    _has_health=$(docker inspect --format='{{if .State.Health}}yes{{else}}no{{end}}' "${container}" 2>/dev/null || echo "no")
+    if [[ "${_has_health}" == "yes" ]]; then
+      local _status
+      _status=$(docker inspect --format='{{.State.Health.Status}}' "${container}" 2>/dev/null || echo "missing")
+      [[ "${_status}" == "healthy" ]]   && { success "  ${container} — healthy"; return 0; }
+      [[ "${_status}" == "unhealthy" ]] && { warn   "  ${container} — unhealthy"; return 1; }
+    else
+      local _running
+      _running=$(docker inspect --format='{{.State.Running}}' "${container}" 2>/dev/null || echo "false")
+      [[ "${_running}" == "true" ]]     && { success "  ${container} — running"; return 0; }
+    fi
     sleep "${HEALTH_INTERVAL}"
     (( elapsed += HEALTH_INTERVAL ))
   done
