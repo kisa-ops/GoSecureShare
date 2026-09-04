@@ -117,6 +117,13 @@ CREATE TABLE IF NOT EXISTS gss_platform.users (
 CREATE INDEX IF NOT EXISTS ix_users_id    ON gss_platform.users (id);
 CREATE INDEX IF NOT EXISTS ix_users_email ON gss_platform.users (email);
 
+-- ── Directory Integration (Local AD / Azure AD) ──────────────────────────
+ALTER TABLE gss_platform.users ADD COLUMN IF NOT EXISTS auth_provider VARCHAR(30) NOT NULL DEFAULT 'local';
+ALTER TABLE gss_platform.users ADD COLUMN IF NOT EXISTS external_id VARCHAR(255) NULL;
+ALTER TABLE gss_platform.users ALTER COLUMN hashed_password DROP NOT NULL;
+CREATE INDEX IF NOT EXISTS ix_users_auth_provider ON gss_platform.users (auth_provider);
+CREATE INDEX IF NOT EXISTS ix_users_external_id ON gss_platform.users (external_id);
+
 -- ── gss_platform.role_definitions  (models/role_definition.py) ────────────
 CREATE TABLE IF NOT EXISTS gss_platform.role_definitions (
     id                     SERIAL      PRIMARY KEY,
@@ -343,7 +350,8 @@ INSERT INTO gss_platform.platform_settings (key, value)
 VALUES
   ('mfa_required',            'false'),
   ('allow_anonymous_secrets', 'true'),
-  ('max_secret_size_kb',      '10240')
+  ('max_secret_size_kb',      '10240'),
+  ('auth_mode',               'local')
 ON CONFLICT (key) DO NOTHING;
 SQL
 
