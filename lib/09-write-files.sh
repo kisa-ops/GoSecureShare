@@ -545,10 +545,36 @@ for img in "${IMAGES[@]}"; do
 done
 success "docker-compose.yml updated to ${TARGET_VERSION}."
 
+# -----------------------------------------------------------------------------
+# Fetch updated DB migration scripts and run db-migrate
+# -----------------------------------------------------------------------------
+info "Updating database migration scripts for ${TARGET_VERSION}..."
+mkdir -p "${INSTALL_DIR}/db"
+_curl_auth=()
+[[ -n "${GHCR_TOKEN:-}" ]] && _curl_auth=(-H "Authorization: Bearer ${GHCR_TOKEN}")
+
+for _f in docker-migrate.sh init.sql; do
+  for _ref in "v${TARGET_VERSION}" "${TARGET_VERSION}" "main"; do
+    if curl -fsSL --connect-timeout 10 \
+        "${_curl_auth[@]}" \
+        "https://raw.githubusercontent.com/kisa-ops/GoSecureShare/${_ref}/db/${_f}" \
+        -o "${INSTALL_DIR}/db/${_f}" 2>/dev/null; then
+      [[ "${_f}" == *.sh ]] && chmod +x "${INSTALL_DIR}/db/${_f}"
+      success "  db/${_f} updated (ref: ${_ref})."
+      break
+    fi
+  done
+done
+
 cd "${INSTALL_DIR}"
+info "Running database migrations..."
+docker compose run --rm db-migrate 2>/dev/null \
+  && success "Database migration completed." \
+  || warn "db-migrate returned non-zero exit code — check logs if startup issues occur."
+
 info "Restarting stack with new images..."
 docker compose up -d
-success "Stack restarted."
+success "Stack restarted." 
 
 step "── Step 7/8: Health verification"
 
