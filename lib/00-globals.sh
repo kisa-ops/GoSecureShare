@@ -20,7 +20,7 @@
 #   • Compared by upgrade.sh against the latest released installer to
 #     warn when the installer scripts on disk are outdated
 # ---------------------------------------------------------------------------
-INSTALLER_VERSION="1.1.0"
+INSTALLER_VERSION="1.2.0"
 
 RED=$'\033[0;31m'; GREEN=$'\033[0;32m'; YELLOW=$'\033[1;33m'
 CYAN=$'\033[0;36m'; BOLD=$'\033[1m'; DIM=$'\033[2m'; RESET=$'\033[0m'
