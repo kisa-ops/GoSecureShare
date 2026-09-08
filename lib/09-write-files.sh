@@ -140,6 +140,8 @@ services:
       - gss_internal
     expose:
       - "8000"
+    volumes:
+      - ./ssl:/opt/gosecureshare/ssl:rw
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
       interval: 5s
@@ -550,6 +552,7 @@ success "docker-compose.yml updated to ${TARGET_VERSION}."
 # -----------------------------------------------------------------------------
 info "Updating database migration scripts for ${TARGET_VERSION}..."
 mkdir -p "${INSTALL_DIR}/db"
+mkdir -p "${INSTALL_DIR}/ssl/platform" "${INSTALL_DIR}/ssl/recipient"
 _curl_auth=()
 [[ -n "${GHCR_TOKEN:-}" ]] && _curl_auth=(-H "Authorization: Bearer ${GHCR_TOKEN}")
 
