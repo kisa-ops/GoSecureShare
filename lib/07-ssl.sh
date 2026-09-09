@@ -296,6 +296,8 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
       cp "${SSL_CERT_DIR}/platform/ca-bundle.pem" "${SSL_CERT_DIR}/recipient/ca-bundle.pem"
       cp "${SSL_CERT_DIR}/platform/fullchain.pem" "${SSL_CERT_DIR}/recipient/fullchain.pem"
       chmod 600 "${SSL_CERT_DIR}/recipient/key.pem"
+      chmod 644 "${SSL_CERT_DIR}/recipient/"*.pem 2>/dev/null || true
+      chmod 600 "${SSL_CERT_DIR}/recipient/key.pem"
       success "  Reusing Platform certificate files for Recipient."
       # No need to re-validate — same files, already validated above.
     else
@@ -313,8 +315,17 @@ if [[ "${_ssl_choice}" == "yes" ]]; then
           "${SSL_CERT_DIR}/recipient/ca-bundle.pem" \
           > "${SSL_CERT_DIR}/recipient/fullchain.pem"
       chmod 600 "${SSL_CERT_DIR}/recipient/key.pem"
+      chmod 644 "${SSL_CERT_DIR}/recipient/"*.pem 2>/dev/null || true
+      chmod 600 "${SSL_CERT_DIR}/recipient/key.pem"
       success "  Recipient certificates saved and fullchain built."
     fi
+
+    # Set world-readable permissions on directory and certs so containers can read them
+    chmod 755 "${SSL_CERT_DIR}" "${SSL_CERT_DIR}/platform" "${SSL_CERT_DIR}/recipient" 2>/dev/null || true
+    chmod 644 "${SSL_CERT_DIR}/platform/"*.pem 2>/dev/null || true
+    chmod 600 "${SSL_CERT_DIR}/platform/key.pem" 2>/dev/null || true
+    chmod 644 "${SSL_CERT_DIR}/recipient/"*.pem 2>/dev/null || true
+    chmod 600 "${SSL_CERT_DIR}/recipient/key.pem" 2>/dev/null || true
 
     PLATFORM_CERT_DIR="${SSL_CERT_DIR}/platform"
     RECIPIENT_CERT_DIR="${SSL_CERT_DIR}/recipient"
