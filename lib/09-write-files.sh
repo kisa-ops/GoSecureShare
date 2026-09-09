@@ -553,6 +553,7 @@ success "docker-compose.yml updated to ${TARGET_VERSION}."
 info "Updating database migration scripts for ${TARGET_VERSION}..."
 mkdir -p "${INSTALL_DIR}/db"
 mkdir -p "${INSTALL_DIR}/ssl/platform" "${INSTALL_DIR}/ssl/recipient"
+chmod 755 "${INSTALL_DIR}/ssl" "${INSTALL_DIR}/ssl/platform" "${INSTALL_DIR}/ssl/recipient" 2>/dev/null || true
 _curl_auth=()
 [[ -n "${GHCR_TOKEN:-}" ]] && _curl_auth=(-H "Authorization: Bearer ${GHCR_TOKEN}")
 
